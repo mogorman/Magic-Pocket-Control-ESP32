@@ -338,9 +338,53 @@ void BMDCameraConnection::sendBytesToOutgoing(std::vector<byte> data, bool respo
     bleChar_OutgoingCameraControl->writeValue(data.data(), data.size(), response);
 }
 
+// [DEBUG] Dump one incoming CCU packet: category, parameter, and the payload
+// rendered as text (so a clip filename like "A011_01011355_C001.braw" is
+// visible if the camera ever sends one). Always on for now; remove once the
+// slate/filename behaviour is understood.
+static void DumpIncomingCCUPacket(const uint8_t* pData, size_t length)
+{
+    if(length < 8)
+        return;
+
+    byte category  = pData[4]; // PacketFormatIndex::Category
+    byte parameter = pData[5]; // PacketFormatIndex::Parameter
+    size_t payloadLen = length - 8; // payload starts at offset 8
+
+    // Render the payload as text, escaping anything non-printable so a binary
+    // payload can't garble the console.
+    std::string text;
+    text.reserve(payloadLen);
+    for(size_t i = 0; i < payloadLen; i++)
+    {
+        char c = (char)pData[8 + i];
+        if(c >= 0x20 && c <= 0x7E)
+            text += c;
+        else
+            text += '.';
+    }
+
+    DEBUG_INFO("[BLE] len=%d cat=%d param=%d payload='%s'",
+        (int)length, (int)category, (int)parameter, text.c_str());
+}
+
+// [DEBUG] Hex dump of a packet we are about to reject (e.g. >64 bytes), so we
+// can see what it actually contains.
+static void DumpRejectedPacketHex(const uint8_t* pData, size_t length)
+{
+    char line[128];
+    int n = snprintf(line, sizeof(line), "[BLE] REJECTED len=%d: ", (int)length);
+    for(size_t i = 0; i < length && n < (int)sizeof(line) - 4; i++)
+        n += snprintf(line + n, sizeof(line) - n, "%02X ", pData[i]);
+    DEBUG_INFO("%s", line);
+}
+
 // Incoming Control Notifications
 void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
+    // [DEBUG] Dump every incoming packet (always on for now).
+    DumpIncomingCCUPacket(pData, length);
+
     // Must be between 8 and 64 bytes inclusive
     if(length >= 8 && length <= 64)
     {
@@ -351,7 +395,11 @@ void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *p
         CCUDecodingFunctions::DecodeCCUPacket(data);
     }
     else
+    {
+        // [DEBUG] Show the bytes of any packet we are about to drop.
+        DumpRejectedPacketHex(pData, length);
         DEBUG_ERROR("Invalid incoming packet length.");
+    }
 }
 
 // Incoming Timecode

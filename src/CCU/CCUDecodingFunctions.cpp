@@ -928,7 +928,12 @@ void CCUDecodingFunctions::DecodeSlateForType(std::vector<byte> inData)
 
 void CCUDecodingFunctions::DecodeSlateForName(std::vector<byte> inData)
 {
-    std::string name = CCUDecodingFunctions::ConvertPayloadDataToString(inData);
+    // [DEBUG] Raw slate payload exactly as received (before any path stripping),
+    // so a real clip filename (e.g. "A011_01011355_C001.braw") is unmistakable.
+    std::string raw = CCUDecodingFunctions::ConvertPayloadDataToString(inData);
+    DEBUG_INFO("[SLATE] raw='%s' (rawlen=%d)", raw.c_str(), (int)raw.size());
+
+    std::string name = raw;
 
     // NOTE: Camera software versions between 7.5 and 7.7.x send the full path of
     // the clip file name. When this is detected, strip the system folders, first
@@ -939,7 +944,7 @@ void CCUDecodingFunctions::DecodeSlateForName(std::vector<byte> inData)
         name = name.substr(match.position() + match.length());
     }
 
-    // [DEBUG] Slate name as received (raw, after any /mnt/sN/ strip).
+    // [DEBUG] Slate name after any /mnt/sN/ strip.
     DEBUG_INFO("[SLATE] name='%s' (len=%d)", name.c_str(), (int)name.size());
 
     BMDControlSystem::getInstance()->getCamera()->onSlateNameReceived(name);
