@@ -158,12 +158,28 @@ private:
     uint32_t _lastDrainMicros = 0; // micros() of the last ring drain (rate-limits SD writes)
 
     // The PSRAM ring buffer that decouples the 1 kHz IMU read from the slower
-    // SD write. Rows are appended here and drained to the file in chunks.
+    // SD write. Rows are appended here by the sampler (loop task) and drained
+    // to the file by the dedicated writer task.
     static const size_t kRingSize = 64 * 1024; // 64 KB
     char* _ring = nullptr;
     size_t _ringWrite = 0;  // next byte to write
     size_t _ringRead = 0;   // next byte to read
     size_t _ringCount = 0; // bytes currently buffered
+
+    // ---- Dedicated SD writer task ----
+    //
+    // The 1 kHz IMU sampling (loop task) and the SD/stdio write must NOT run on
+    // the same task: running the C stdio FILE*/fwrite (File::write) path in
+    // tight alternation with the interrupt-driven I2C reads corrupts the
+    // internal heap. So all SD/stdio work is moved to a dedicated FreeRTOS
+    // task. The sampler (loop task) only does I2C + a memcpy into the PSRAM
+    // ring; the writer task owns the File and drains the ring. The ring is
+    // protected by _ringMutex; the writer is woken by _dataSem whenever the
+    // sampler has appended a meaningful chunk.
+    TaskHandle_t _writerTask = nullptr;
+    SemaphoreHandle_t _ringMutex = nullptr;   // protects _ring*
+    SemaphoreHandle_t _dataSem = nullptr;    // binary sem: writer has data to drain
+    volatile bool _writerStop = false;       // ask the writer task to exit
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
@@ -182,11 +198,23 @@ private:
     static const char* kNvsNamespace;
     static const char* kNvsKeyOrientation;
 
-    // Drain as much of the ring buffer as possible to the file.
+    // Drain as much of the ring buffer as possible to the file. Called by the
+    // writer task (and once more from end() to flush the tail).
     void drainRing();
+
+    // The dedicated SD writer task body. Waits on _dataSem, then drains the
+    // ring to the file. Runs on its own FreeRTOS task so the C stdio / SD
+    // path never shares a task with the 1 kHz I2C sampling.
+    static void writerTaskTrampoline(void* param);
+    void writerTask();
 
     // Allocate the ring buffer in PSRAM. Returns true on success.
     bool allocRing();
+
+    // Start / stop the dedicated writer task. startWriterTask() is called from
+    // begin(); stopWriterTask() from end() (flushes + joins the task).
+    bool startWriterTask();
+    void stopWriterTask();
 
     // Make sure the SD card is mounted (CS pin GPIO4). Sets _sdReady and
     // _sdStatusMessage. Returns true if the card is ready.

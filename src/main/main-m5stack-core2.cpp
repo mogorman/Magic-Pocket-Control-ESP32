@@ -4161,7 +4161,7 @@ static void sdStressTest()
 //
 // Set IMU_SAMPLE_TEST to 1 to run it at boot.
 #ifndef IMU_SAMPLE_TEST
-#define IMU_SAMPLE_TEST 1
+#define IMU_SAMPLE_TEST 0
 #endif
 
 #if IMU_SAMPLE_TEST
