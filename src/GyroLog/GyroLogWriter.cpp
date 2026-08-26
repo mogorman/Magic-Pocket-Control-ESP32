@@ -3,7 +3,7 @@
 // in-RAM ring. If the clip-end heap corruption disappears with this on, the
 // SD/FatFs write path is the corruptor; if it persists, the IMU I2C read is.
 #ifndef GYROLOG_DIAG_NO_SD_WRITE
-#define GYROLOG_DIAG_NO_SD_WRITE 1 // [DIAG] 1 = skip all SD I/O (isolation test)
+#define GYROLOG_DIAG_NO_SD_WRITE 0
 #endif
 
 #include "GyroLogWriter.h"
@@ -554,7 +554,11 @@ void GyroLogWriter::drainRing()
 
     _ringRead = (_ringRead + total) % kRingSize;
     _ringCount = 0;
-    _file.flush();
+    // [DIAG] No per-drain flush(): the repeated f_sync (SD sector commit) ~7x/s
+    // is the suspected heap corruptor. Data is still committed by the single
+    // flush() in end(). If the crash returns without this, the write() is the
+    // culprit, not the flush().
+    // _file.flush();
 #endif
 }
 
