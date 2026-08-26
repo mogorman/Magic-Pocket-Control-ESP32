@@ -4467,7 +4467,10 @@ void loop() {
   }
 
   // 3) Whenever we leave the playback-reading phase (name received or timeout),
-  //    flip the camera back to record so it's ready for the next clip.
+  //    flip the camera back to PREVIEW. We must NOT use Record here: on a BMD
+  //    camera, setting the transport mode to Record immediately *starts* a new
+  //    clip, so "switching back to Record" would fire off a fresh recording.
+  //    Preview is the idle standby state the camera sits in between clips.
   if(!gyroInPlayback && gyroPlaybackCommandSent &&
      cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
@@ -4476,8 +4479,8 @@ void loop() {
     if(cam && cam->hasTransportMode())
     {
       TransportInfo ti = cam->getTransportMode();
-      ti.mode = CCUPacketTypes::MediaTransportMode::Record;
-      DEBUG_INFO("[GYRO] switching camera back to Record");
+      ti.mode = CCUPacketTypes::MediaTransportMode::Preview;
+      DEBUG_INFO("[GYRO] switching camera back to Preview");
       PacketWriter::writeTransportInfo(ti, &cameraConnection);
     }
   }
