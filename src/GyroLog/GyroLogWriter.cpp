@@ -1,39 +1,13 @@
-// [DIAG] Isolation toggle. When set, the GCSV writer skips ALL SD card I/O
-// (open/write/close/sync) but still samples the MPU6886 at 1 kHz into the
-// in-RAM ring. If the clip-end heap corruption disappears with this on, the
-// SD/FatFs write path is the corruptor; if it persists, the IMU I2C read is.
-#ifndef GYROLOG_DIAG_NO_SD_WRITE
-#define GYROLOG_DIAG_NO_SD_WRITE 0
-#endif
-
-// [DIAG] Isolation toggle. When set, the SD card is MOUNTED (SD.begin) but no
-// file is opened or written during the clip -- only the 1 kHz IMU sampling
-// runs. If the heap stays clean, the corruption is from the file open/write
-// (not the mount); if it corrupts, merely mounting the SD + 1 kHz sampling is
-// the trigger.
-#ifndef GYROLOG_DIAG_MOUNT_ONLY
-#define GYROLOG_DIAG_MOUNT_ONLY 0
-#endif
-
 #include "GyroLogWriter.h"
-#include <SD.h>
 #include <M5Unified.h>
 #include <nvs.h>
-#include <esp_heap_caps.h> // heap_caps_free (the correct free for ps_malloc'd PSRAM)
+#include <esp_heap_caps.h> // heap_caps_check_integrity_all (diagnostics)
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h> // uxTaskGetStackHighWaterMark (stack-overflow diagnostic)
 #include <math.h>
 #include <cstring>
 #include <time.h>
-#include <fcntl.h>   // open(), O_WRONLY/O_CREAT/O_TRUNC
-#include <unistd.h>  // write(), close(), lseek(), fsync()
 #include "Arduino_DebugUtils.h"
-
-// FatFs, for setting a file's modification time (f_utime) in setFileMtime().
-// The SD library is built on FatFs, so ff.h is on the include path.
-extern "C" {
-#include "ff.h"
-}
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -232,17 +206,6 @@ const char* GyroLogWriter::orientationToken(int index)
     return GYROLOG_ORIENTATION_TOKENS[index];
 }
 
-bool GyroLogWriter::allocRing()
-{
-    _ring = (char*)ps_malloc(kRingSize);
-    if(!_ring)
-        return false;
-    _ringWrite = 0;
-    _ringRead = 0;
-    _ringCount = 0;
-    return true;
-}
-
 void GyroLogWriter::loadOrientation()
 {
     nvs_handle_t handle = 0;
@@ -314,36 +277,31 @@ bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* a
     return true;
 }
 
+// Make sure the SD card is mounted via SdFat. The Core2's microSD slot is on
+// the SPI bus with its chip-select on GPIO4. We share the SPI bus with the
+// M5GFX display (SHARED_SPI), so SdFat toggles only the SD's CS pin. The SPI
+// clock is capped at 40 MHz, which is comfortably within the card's spec and
+// leaves headroom for the display's own SPI traffic.
 bool GyroLogWriter::ensureSd()
 {
-#if GYROLOG_DIAG_NO_SD_WRITE
-    // [DIAG] No SD I/O: pretend the card is ready so begin() proceeds and the
-    // 1 kHz sampling runs without any SD mount/write.
-    _sdReady = true;
-    _sdStatusMessage = "diag: no SD";
-    return true;
-#else
-    // If the filesystem is already mounted, it's ready.
-    if(SD.cardSize() > 0)
+    // If the volume is already mounted and a valid FAT volume is present, it's
+    // ready. fatType() is non-zero only when a real FAT16/32/exFAT volume is
+    // mounted, so this doubles as the "card present" check.
+    if(_sd.fatType() != 0)
     {
         _sdReady = true;
         _sdStatusMessage = "ready";
         return true;
     }
 
-    // Not mounted yet. The Core2's microSD slot is on the SPI bus with its
-    // chip-select on GPIO4. The Arduino SD library's default CS is the
-    // variant's SS pin (GPIO5 on the Core2), which is actually the LCD's CS,
-    // so we must pass the correct pin explicitly or the card never mounts.
-    if(!SD.begin(4))
+    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40))))
     {
         _sdReady = false;
         _sdStatusMessage = "mount failed (no card / not FAT?)";
         return false;
     }
 
-    // begin() returned true, but double-check a card is actually present.
-    if(SD.cardSize() > 0)
+    if(_sd.fatType() != 0)
     {
         _sdReady = true;
         _sdStatusMessage = "ready";
@@ -353,12 +311,11 @@ bool GyroLogWriter::ensureSd()
     _sdReady = false;
     _sdStatusMessage = "no card detected";
     return false;
-#endif
 }
 
 // Force the FAT volume's cached directory entries (file sizes + cluster
-// pointers) to be written to the card. File::close() only flushes the file's
-// own data buffer; the directory entry that records a file's size lives in a
+// pointers) to be written to the card. FatFile::close() flushes the file's own
+// data buffer, but the directory entry that records a file's size lives in a
 // separate RAM cache that FatFs otherwise only commits on the next directory
 // operation or on unmount. Because we close the log and then just sit idle,
 // that directory update never reaches the card, so the file shows as 0 bytes
@@ -366,20 +323,11 @@ bool GyroLogWriter::ensureSd()
 // commit. The Core2 mounts the microSD on CS pin 4 (see ensureSd()).
 void GyroLogWriter::syncVolume()
 {
-    if(SD.cardSize() == 0)
+    if(_sd.fatType() == 0)
         return; // not mounted
 
-    // [DIAG] Verify heap integrity right before the unmount/remount. The crash
-    // has been in the SD.begin() -> ff_memalloc here; if the heap is already
-    // corrupt before we get here, this prints the offending block so we know
-    // the corruption happened earlier (during the clip) rather than in the
-    // remount itself.
-    if(!heap_caps_check_integrity_all(true))
-        DEBUG_ERROR("[GYRO-DIAG] syncVolume(): heap ALREADY corrupt before SD remount (internal free=%lu, psram free=%lu)",
-            (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
-
-    SD.end();
-    SD.begin(4);
+    _sd.end();
+    _sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40)));
 }
 
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
@@ -395,7 +343,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         DEBUG_INFO("[GYRO-DIAG] begin(): ensureSd FAILED (msg='%s')", _sdStatusMessage.c_str());
         return false;
     }
-    DEBUG_INFO("[GYRO-DIAG] begin(): SD ready, cardSize=%lu", (unsigned long)SD.cardSize());
+    DEBUG_INFO("[GYRO-DIAG] begin(): SD ready, fatType=%d", (int)_sd.fatType());
 
     // Sanitise the clip name (drops placeholder slate names like "Next Clip"
     // and replaces any file-name-unsafe characters). The caller falls back to a
@@ -410,25 +358,26 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     char path[128];
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    // Open the GCSV file with the VFS open() syscall (NOT the Arduino File /
-    // newlib stdio). The SD volume is mounted at the VFS path "/sd", so the full
-    // path is "/sd/<name>.gcsv". The write() syscall routes straight to FatFs
-    // f_write with no newlib FILE buffer.
-    char vfsPath[160];
-    snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
-    _fd = open(vfsPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if(_fd < 0)
+
+    // Open the GCSV file with SdFat. SdFat paths are relative to the volume
+    // root, so "/<name>.gcsv" is correct (no "/sd" VFS prefix). O_CREAT|O_TRUNC
+    // creates/truncates the file.
+    if(!_file.open(_gcsvPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC))
     {
-        DEBUG_INFO("[GYRO-DIAG] begin(): open() FAILED for '%s'", vfsPath);
+        DEBUG_INFO("[GYRO-DIAG] begin(): FatFile::open FAILED for '%s' (err=%d)", _gcsvPath.c_str(), (int)_file.getError());
         return false;
     }
-    // [DIAG] Is the heap already corrupt right after the open (before any write)?
-    if(!heap_caps_check_integrity_all(true))
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap ALREADY corrupt right after open()");
-    else
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK right after open()");
-#endif
+
+    // Pre-allocate the file up front so the SD card never has to search for
+    // free clusters mid-write (the high-speed-logging pattern). We reserve a
+    // generous size; any unused pre-allocated space is removed by truncate() at
+    // close. 14 MB is ~46 s at 1 kHz (30 B/row) -- enough for most clips, and
+    // SdFat grows it if needed.
+    _file.preAllocate(14UL * 1024 * 1024);
+
+    // Wire the ring buffer to the file. The sampler writes rows into the ring;
+    // drainRing() calls ring.writeOut() to commit them to the file.
+    _ring.begin(&_file);
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
@@ -477,23 +426,10 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         kTscale,
         kGscale,
         kAscale);
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    ssize_t wn = write(_fd, header, (size_t)n);
-    // [DIAG] Is the heap corrupt after the first write (the header)?
-    if(!heap_caps_check_integrity_all(true))
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap corrupt after header write() (wrote %ld of %d)",
-            (long)wn, n);
-    else
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK after header write()");
-#endif
 
-    if(!allocRing())
-    {
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        closeFile();
-#endif
-        return false;
-    }
+    // Write the header straight to the file (before any samples). A single
+    // FatFile::write of the whole header is fine -- it's a few hundred bytes.
+    _file.write((const uint8_t*)header, (size_t)n);
 
     _tMs = 0;
     _startMicros = micros();
@@ -557,39 +493,18 @@ void GyroLogWriter::poll()
     int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
         (unsigned long)_tMs, igx, igy, igz, iax, iay, iaz);
 
-    // Append to the ring buffer if there is room; otherwise drop (we never
-    // block the 1 kHz cadence on a full buffer). This runs on the same task as
-    // the drain, so no locking is needed.
-    //
-    // [DIAG] The crash is a wild-pointer fault in this memcpy. Log the ring
-    // pointer/index and a heap-integrity check once per second to see whether
-    // _ring/_ringWrite are already corrupt (=> something else overwrote the
-    // GyroLogWriter object / its heap) or whether the heap was corrupted by an
-    // earlier operation.
-    static uint32_t lastRingDiag = 0;
-    if(now - lastRingDiag >= 1000000)
-    {
-        lastRingDiag = now;
-        bool ok = heap_caps_check_integrity_all(true);
-        DEBUG_INFO("[GYRO-DIAG] ring: _ring=%p _ringWrite=%lu _ringCount=%lu _ringRead=%lu heap=%s obj=%p",
-            (void*)_ring, (unsigned long)_ringWrite, (unsigned long)_ringCount,
-            (unsigned long)_ringRead, ok ? "OK" : "CORRUPT", (void*)this);
-    }
-
-    if(_ringCount < kRingSize && _ringCount + (size_t)n <= kRingSize)
-    {
-        memcpy(_ring + _ringWrite, row, (size_t)n);
-        _ringWrite = (_ringWrite + n) % kRingSize;
-        _ringCount += (size_t)n;
-    }
+    // Append the row to the ring buffer. RingBuf::write() drops the data if the
+    // buffer is full (it never blocks), so a full ring just means a sample is
+    // dropped -- we never stall the 1 kHz cadence. This is the exact
+    // TeensySdioLogger pattern: the sampler writes into the RingBuf, and a
+    // separate drain commits it to the file.
+    _ring.write((const uint8_t*)row, (size_t)n);
 
     // Drain the ring to the file, but rate-limit the writes. The 1 kHz sampling
     // fills the ring continuously; we flush it at most once per 50 ms (20 Hz)
     // and only once a decent chunk has accumulated. This runs on the same (loop)
-    // task as the I2C sampling -- there is no separate writer task. The write
-    // goes through the VFS write() syscall (no newlib stdio FILE buffer), which
-    // is what avoids the internal-heap corruption.
-    if(now - _lastDrainMicros >= 50000 && _ringCount >= 1024)
+    // task as the I2C sampling -- there is no separate writer task.
+    if(now - _lastDrainMicros >= 50000 && _ring.bytesUsed() >= 1024)
     {
         _lastDrainMicros = now;
         drainRing();
@@ -600,84 +515,34 @@ void GyroLogWriter::poll()
     if(now - lastPollLog >= 1000000)
     {
         lastPollLog = now;
-        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms ringCount=%lu i2cOK",
-            (unsigned long)_tMs, (unsigned long)_ringCount);
+        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms ringUsed=%lu heap=%s",
+            (unsigned long)_tMs, (unsigned long)_ring.bytesUsed(),
+            heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
     }
 }
 
 void GyroLogWriter::drainRing()
 {
-#if GYROLOG_DIAG_NO_SD_WRITE
-    // [DIAG] No SD: just discard the buffered rows so the ring keeps turning.
-    // This lets us test whether the 1 kHz IMU sampling alone (no SD writes)
-    // corrupts the heap.
-    _ringRead = 0;
-    _ringWrite = 0;
-    _ringCount = 0;
-    return;
-#else
-    if(_fd < 0)
+    if(!_file.isOpen())
         return;
 
-    // This runs on the same (loop) task as the sampler, so there is no
-    // concurrency to guard against -- no mutex needed. We copy the available
-    // bytes out of the (possibly wrapped) PSRAM ring into a small internal-DRAM
-    // buffer and write that to the file via the VFS write() syscall (routes to
-    // FatFs f_write, no newlib stdio FILE buffer). We drain in 4 KB pieces.
-    static uint8_t* s_chunk = nullptr;
-    if(!s_chunk)
-        s_chunk = (uint8_t*)heap_caps_malloc(kChunkSize, MALLOC_CAP_INTERNAL);
-    if(!s_chunk)
-    {
-        static bool warned = false;
-        if(!warned)
-        {
-            warned = true;
-            DEBUG_ERROR("[GYRO-DIAG] drainRing: internal malloc(%lu) for chunk FAILED (free internal=%lu)",
-                (unsigned long)kChunkSize, (unsigned long)ESP.getFreeHeap());
-        }
-        return;
-    }
-
-    size_t totalDrained = 0;
-    while(_ringCount > 0)
-    {
-        size_t n = _ringCount < kChunkSize ? _ringCount : kChunkSize;
-        // Copy the next n bytes out of the (possibly wrapped) ring.
-        size_t head = (kRingSize - _ringRead) < n ? (kRingSize - _ringRead) : n;
-        memcpy(s_chunk, _ring + _ringRead, head);
-        if(n > head)
-            memcpy(s_chunk + head, _ring, n - head);
-        _ringRead = (_ringRead + n) % kRingSize;
-        _ringCount -= n;
-        totalDrained += n;
-
-        // Write the stable internal buffer to the file via the VFS write()
-        // syscall (routes to FatFs f_write, no newlib stdio FILE buffer).
-        ssize_t wn = write(_fd, s_chunk, n);
-        (void)wn;
-    }
-
-    // [DIAG] Log what this drain removed.
-    static uint32_t lastDrainLog = 0;
-    if(xTaskGetTickCount() - lastDrainLog >= 1000)
-    {
-        lastDrainLog = xTaskGetTickCount();
-        DEBUG_INFO("[GYRO-DIAG] drainRing: drained=%lu ringCount=%lu",
-            (unsigned long)totalDrained, (unsigned long)_ringCount);
-    }
-#endif
+    // Commit everything buffered in the ring to the file. RingBuf::writeOut()
+    // reads from the ring and calls FatFile::write() (a direct FatFs f_write,
+    // no newlib stdio FILE buffer). It runs on the same (loop) task as the
+    // sampler, so there is no concurrency to guard against.
+    _ring.writeOut(_ring.bytesUsed());
 }
 
 void GyroLogWriter::closeFile()
 {
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    if(_fd >= 0)
+    if(_file.isOpen())
     {
-        close(_fd);
-        _fd = -1;
+        // Remove any unused pre-allocated space, then flush the file's data and
+        // its directory entry (size) to the card.
+        _file.truncate();
+        _file.sync();
+        _file.close();
     }
-#endif
 }
 
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
@@ -689,13 +554,14 @@ void GyroLogWriter::closeFile()
 // once per clip, so a full read/rewrite is fine. Returns true on success.
 bool GyroLogWriter::rewriteVideoFileName(const std::string& path, const std::string& newVideoFileName)
 {
-    File f = SD.open(path.c_str(), FILE_READ);
-    if(!f)
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
         return false;
 
-    size_t size = f.size();
+    size_t size = f.fileSize();
     std::string content;
     content.reserve(size + 64);
+    char buf[256];
     int c;
     while((c = f.read()) != -1)
         content += (char)c;
@@ -719,8 +585,8 @@ bool GyroLogWriter::rewriteVideoFileName(const std::string& path, const std::str
         out.append(content, lineEnd, content.size() - lineEnd); // keep the trailing \n and the rest
 
     // Write it back.
-    File w = SD.open(path.c_str(), FILE_WRITE);
-    if(!w)
+    FatFile w;
+    if(!w.open(path.c_str(), O_WRONLY | O_TRUNC))
         return false;
     w.write((const uint8_t*)out.data(), out.size());
     w.close();
@@ -731,11 +597,11 @@ bool GyroLogWriter::rewriteVideoFileName(const std::string& path, const std::str
 // given UNIX epoch. Same read-modify-write approach as rewriteVideoFileName().
 bool GyroLogWriter::rewriteTimestamp(const std::string& path, long epoch)
 {
-    File f = SD.open(path.c_str(), FILE_READ);
-    if(!f)
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
         return false;
 
-    size_t size = f.size();
+    size_t size = f.fileSize();
     std::string content;
     content.reserve(size + 64);
     int c;
@@ -761,8 +627,8 @@ bool GyroLogWriter::rewriteTimestamp(const std::string& path, long epoch)
     if(lineEnd < content.size())
         out.append(content, lineEnd, content.size() - lineEnd);
 
-    File w = SD.open(path.c_str(), FILE_WRITE);
-    if(!w)
+    FatFile w;
+    if(!w.open(path.c_str(), O_WRONLY | O_TRUNC))
         return false;
     w.write((const uint8_t*)out.data(), out.size());
     w.close();
@@ -770,29 +636,24 @@ bool GyroLogWriter::rewriteTimestamp(const std::string& path, long epoch)
 }
 
 // Set the FAT modification time of the file at `path` to `epoch` (UNIX
-// seconds) using FatFs's f_utime(). The SD card is mounted at "/sd" (see
-// SD.h), so the FatFs path is "/sd" + the path we open the file with. The
-// caller sets the system clock to the clip's date first, so the timestamp we
-// pass matches it. syncVolume() then commits the directory entry to the card.
+// seconds) using SdFat's FatFile::timestamp(). The caller sets the system clock
+// to the clip's date first, so the timestamp we pass matches it. syncVolume()
+// then commits the directory entry to the card.
 bool GyroLogWriter::setFileMtime(const std::string& path, long epoch)
 {
-    // f_utime is a raw FatFs call, so the path must use the FatFs drive "0:"
-    // (the SD card), not the VFS "/sd" mapping.
-    char fatfsPath[160];
-    snprintf(fatfsPath, sizeof(fatfsPath), "0:%s", path.c_str());
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+        return false;
 
-    // Convert the UNIX epoch to the packed FAT date/time words.
+    // Convert the UNIX epoch to calendar components.
     time_t t = (time_t)epoch;
     struct tm tmv;
     localtime_r(&t, &tmv);
-    uint16_t fdate = (uint16_t)(((tmv.tm_year + 1980) << 9) | ((tmv.tm_mon + 1) << 5) | tmv.tm_mday);
-    uint16_t ftime = (uint16_t)((tmv.tm_hour << 11) | (tmv.tm_min << 5) | (tmv.tm_sec / 2));
 
-    FILINFO fi;
-    memset(&fi, 0, sizeof(fi));
-    fi.fdate = fdate;
-    fi.ftime = ftime;
-    return f_utime(fatfsPath, &fi) == FR_OK;
+    bool ok = f.timestamp(T_WRITE, (uint16_t)(tmv.tm_year + 1900), (uint8_t)(tmv.tm_mon + 1),
+        (uint8_t)tmv.tm_mday, (uint8_t)tmv.tm_hour, (uint8_t)tmv.tm_min, (uint8_t)tmv.tm_sec);
+    f.close();
+    return ok;
 }
 
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
@@ -815,11 +676,10 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     snprintf(newPath, sizeof(newPath), "/%s.gcsv", name.c_str());
 
     // The file was already closed (and its directory entry committed to the
-    // card) by end(). Move it to the real clip name with SD.rename() (a FatFs
-    // f_rename).
+    // card) by end(). Move it to the real clip name with SdFat's rename().
     if(std::strcmp(oldPath, newPath) != 0)
     {
-        bool renamed = SD.rename(oldPath, newPath);
+        bool renamed = _sd.rename(oldPath, newPath);
         DEBUG_INFO("[GYRO-RENAME] rename '%s' -> '%s' ok=%d", oldPath, newPath, (int)renamed);
         // The rename dirties the directory again; commit it to the card.
         syncVolume();
@@ -885,35 +745,25 @@ bool GyroLogWriter::end()
     // directory entry to the card. All on this (loop) task -- there is no
     // separate writer task.
     drainRing();
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    if(_fd >= 0)
+    if(_file.isOpen())
     {
-        off_t pos = lseek(_fd, 0, SEEK_CUR);
-        _finalFileSizeBytes = (pos >= 0) ? (uint64_t)pos : 0;
-        close(_fd);
-        _fd = -1;
+        _finalFileSizeBytes = _file.fileSize();
+        closeFile(); // truncate() + sync() + close()
         syncVolume();
     }
-#endif
 
     // Capture the summary.
     _summary.valid = true;
     _summary.fileName = _startedName + ".gcsv";
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = _tMs;
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     _summary.fileSizeBytes = _finalFileSizeBytes;
-    _summary.totalBytes = SD.totalBytes();
-    _summary.freeBytes = SD.totalBytes() - SD.usedBytes();
-#endif
-
-    if(_ring)
-    {
-        // _ring was allocated with ps_malloc (the SPIRAM/PSRAM heap), so it
-        // must be freed with heap_caps_free, NOT vPortFree.
-        heap_caps_free(_ring);
-        _ring = nullptr;
-    }
+    // Total/free space from the volume's cluster counts (SdFat has no
+    // totalBytes()/usedBytes(); FatVolume inherits FatPartition which has
+    // clusterCount(), freeClusterCount(), and bytesPerCluster()).
+    uint32_t bpc = _sd.bytesPerCluster();
+    _summary.totalBytes = (uint64_t)_sd.clusterCount() * bpc;
+    _summary.freeBytes = (uint64_t)(int32_t)_sd.freeClusterCount() * bpc;
 
     _state = State::Idle;
     return true;

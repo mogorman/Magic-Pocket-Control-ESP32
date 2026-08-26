@@ -4,7 +4,8 @@
 #include <Arduino.h>
 #include <string>
 #include <cstdint>
-#include "FS.h" // for File / SD
+#include "SdFat.h" // Adafruit SdFat (FatFile, SdSpiConfig)
+#include "RingBuf.h" // Adafruit SdFat RingBuf (decouples 1 kHz sampling from SD writes)
 
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
@@ -127,15 +128,21 @@ public:
 private:
     State _state = State::Idle;
 
-    // The GCSV file, as a POSIX VFS file descriptor. We deliberately do NOT use
-    // the Arduino File / newlib stdio (fwrite) path: newlib's FILE* buffering
-    // corrupts the internal heap when exercised during 1 kHz I2C sampling (the
-    // __sfvwrite_r -> memmove fault we kept hitting). Instead we open the file
-    // with the VFS open() syscall and write with the VFS write() syscall, which
-    // routes straight to the FatFs f_write handler with no newlib FILE buffer.
-    // The data is written in small chunks from a dedicated writer task so the
-    // 1 kHz I2C sampling on the loop task never does SD work itself.
-    int _fd = -1;
+    // The SD card / filesystem, driven by Adafruit SdFat (not the Arduino SD /
+    // VFS / newlib-stdio path, which corrupted the internal heap when exercised
+    // during 1 kHz I2C sampling). SdFat talks to the card over SPI directly and
+    // writes through its own FatFile, with no newlib FILE* buffering.
+    SdFat _sd;
+
+    // The GCSV file we are writing (only valid while recording/finalizing).
+    FatFile _file;
+
+    // The ring buffer that decouples the 1 kHz IMU sampling from the SD write,
+    // modeled on the Adafruit SdFat high-speed-logging pattern (TeensySdioLogger):
+    // the sampler writes GCSV rows into the RingBuf, and the drain calls
+    // writeOut() which commits the buffered bytes to the FatFile. 8 KB is enough
+    // to hold a second or more of ~30-byte rows at 1 kHz.
+    RingBuf<FatFile, 8192> _ring;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
@@ -157,8 +164,8 @@ private:
     long _timestampEpoch = 0;
     std::string _gcsvPath;
 
-    // The final on-card size of the .gcsv file, captured just before the writer
-    // task closes it (the FIL handle is then freed, so we can't query it after).
+    // The final on-card size of the .gcsv file, captured just before the file is
+    // closed (FatFile::fileSize()).
     uint64_t _finalFileSizeBytes = 0;
 
     // Timing: t is the elapsed ms since the clip started (real, micros-based so
@@ -167,19 +174,6 @@ private:
     uint32_t _lastSampleMicros = 0;
     uint32_t _startMicros = 0; // micros() at the moment the log started
     uint32_t _lastDrainMicros = 0; // micros() of the last ring drain (rate-limits SD writes)
-
-    // The PSRAM ring buffer that decouples the 1 kHz IMU read from the slower
-    // SD write. Rows are appended here by the sampler (loop task) and drained
-    // to the file by the dedicated writer task.
-    static const size_t kRingSize = 64 * 1024; // 64 KB
-    // Size of the internal-DRAM chunk buffer used to copy data out of the ring
-    // before the SD write. Kept small (4 KB) so the internal allocation always
-    // succeeds and the write reads from a stable internal buffer.
-    static const size_t kChunkSize = 4096;
-    char* _ring = nullptr;
-    size_t _ringWrite = 0;  // next byte to write
-    size_t _ringRead = 0;   // next byte to read
-    size_t _ringCount = 0; // bytes currently buffered
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
@@ -198,18 +192,15 @@ private:
     static const char* kNvsNamespace;
     static const char* kNvsKeyOrientation;
 
-    // Drain as much of the ring buffer as possible to the file. Called from
-    // poll() (rate-limited) and once more from end() to flush the tail.
+    // Drain as much of the ring buffer as possible to the file (RingBuf::writeOut).
+    // Called from poll() (rate-limited) and once more from end() to flush the tail.
     void drainRing();
 
-    // Close the file descriptor. Safe to call when no file is open.
+    // Close the FatFile and commit it to the card. Safe to call when no file is open.
     void closeFile();
 
-    // Allocate the ring buffer in PSRAM. Returns true on success.
-    bool allocRing();
-
-    // Make sure the SD card is mounted (CS pin GPIO4). Sets _sdReady and
-    // _sdStatusMessage. Returns true if the card is ready.
+    // Make sure the SD card is mounted via SdFat (CS pin GPIO4). Sets _sdReady
+    // and _sdStatusMessage. Returns true if the card is ready.
     bool ensureSd();
 
     // Force the FAT volume's cached directory entries to be written to the

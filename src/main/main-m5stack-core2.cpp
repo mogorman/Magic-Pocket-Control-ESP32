@@ -4282,6 +4282,168 @@ static void imuSampleTest()
 }
 #endif // IMU_SAMPLE_TEST
 
+// Standalone test: on boot, sample the MPU6886 at 1 kHz and write GCSV rows to
+// a SdFat file (via the RingBuf, exactly the path GyroLogWriter uses) until the
+// file reaches 14 MB, then stop and report. This exercises the FULL SdFat write
+// path (open + preAllocate + RingBuf::writeOut -> FatFile::write + truncate +
+// sync + close) under the 1 kHz I2C load, to confirm it is stable (no heap
+// corruption, no crash) and to measure the achieved write throughput.
+//
+// Set IMU_SD_WRITE_TEST to 1 to run it at boot.
+#ifndef IMU_SD_WRITE_TEST
+#define IMU_SD_WRITE_TEST 0
+#endif
+
+#if IMU_SD_WRITE_TEST
+static void imuSdWriteTest()
+{
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== IMU 1 kHz -> SdFat 14 MB WRITE TEST ===");
+
+  // Bump the ODR to 1 kHz, exactly as the real logger does.
+  M5.In_I2C.writeRegister8(0x68, 0x19, 0x00, 400000); // SMPLRT_DIV = 0 -> 1 kHz
+
+  // Mount the SD via SdFat (CS pin 4, shared SPI, 40 MHz) -- same as the logger.
+  SdFat sd;
+  if(!sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40))))
+  {
+    Serial.println("SdFat begin FAILED");
+    for(;;) delay(1000);
+  }
+  Serial.printf("SdFat mounted. fatType=%d\n", (int)sd.fatType());
+
+  const char* path = "/imutest.gcsv";
+  FatFile file;
+  if(!file.open(path, O_WRONLY | O_CREAT | O_TRUNC))
+  {
+    Serial.printf("open FAILED for %s (err=%d)\n", path, (int)file.getError());
+    for(;;) delay(1000);
+  }
+  // Pre-allocate 14 MB up front (the high-speed-logging pattern) so the card
+  // never searches for free clusters mid-write.
+  file.preAllocate(14UL * 1024 * 1024);
+
+  // The ring buffer that decouples the 1 kHz sampling from the SD write,
+  // exactly as GyroLogWriter uses it.
+  RingBuf<FatFile, 8192> ring;
+  ring.begin(&file);
+
+  // Write a small GCSV-style header so the file is a plausible log.
+  const char* header =
+    "GYROFLOW IMU LOG\n"
+    "version,1.3\n"
+    "id,m5stack-core2-mpu6886\n"
+    "orientation,XYZ\n"
+    "note,IMU SD write test 1kHz\n"
+    "tscale,0.001\n"
+    "gscale,0.00021714498\n"
+    "ascale,0.00024414063\n"
+    "t,gx,gy,gz,ax,ay,az\n";
+  file.write((const uint8_t*)header, strlen(header));
+
+  const size_t kTarget = 14UL * 1024 * 1024; // 14 MB
+  uint32_t start = micros();
+  uint32_t lastSample = start;
+  uint32_t lastDrain = start;
+  uint32_t lastHeapCheck = start;
+  uint32_t samples = 0;
+  uint32_t i2cFails = 0;
+  bool heapFail = false;
+
+  Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
+  for(;;)
+  {
+    uint32_t now = micros();
+
+    // Sample at ~1 kHz (same gate as the logger).
+    if(now - lastSample < 1000)
+      continue;
+    lastSample = now;
+
+    // Read the IMU directly (14-byte burst at 400 kHz), as readImu() does.
+    uint8_t buf[14];
+    if(!M5.In_I2C.readRegister(0x68, 0x3B, buf, 14, 400000))
+    {
+      i2cFails++;
+      continue;
+    }
+    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
+    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
+    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
+    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
+    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
+    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
+
+    // Format a GCSV row and append it to the ring (drops if full, as the
+    // logger does).
+    char row[64];
+    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+      (unsigned long)((now - start) / 1000),
+      (long)rawGx, (long)rawGy, (long)rawGz,
+      (long)rawAx, (long)rawAy, (long)rawAz);
+    ring.write((const uint8_t*)row, (size_t)n);
+    samples++;
+
+    // Drain the ring to the file at most once per 50 ms (20 Hz), same as the
+    // logger.
+    if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
+    {
+      lastDrain = now;
+      ring.writeOut(ring.bytesUsed());
+    }
+
+    // Once per second: check heap integrity + report progress.
+    if(now - lastHeapCheck >= 1000000)
+    {
+      lastHeapCheck = now;
+      bool ok = heap_caps_check_integrity_all(true);
+      if(!ok && !heapFail)
+      {
+        heapFail = true;
+        Serial.printf("!! HEAP INTEGRITY FAIL at t=%lu ms (samples=%lu, i2cFails=%lu, internal free=%lu, psram free=%lu)\n",
+          (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+          (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+      }
+      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu  fileSize=%lu/%lu  heap=%s\n",
+        (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+        (unsigned long)ring.bytesUsed(), (unsigned long)file.fileSize(), (unsigned long)kTarget,
+        ok ? "OK" : "CORRUPT");
+    }
+
+    // Stop once the file has reached the target size.
+    if(file.fileSize() >= kTarget)
+      break;
+  }
+
+  // Final drain + close (truncate the unused pre-allocated space, sync, close).
+  ring.writeOut(ring.bytesUsed());
+  file.truncate();
+  file.sync();
+  file.close();
+  // Commit the directory entry to the card.
+  sd.end();
+  sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40)));
+
+  uint32_t elapsedMs = (micros() - start) / 1000;
+  bool finalOk = heap_caps_check_integrity_all(true);
+  if(!finalOk && !heapFail)
+    heapFail = true;
+
+  Serial.printf("\nIMU SD WRITE TEST done: %lu samples in %lu ms, %lu i2c failures, heap %s\n",
+    (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)i2cFails, heapFail ? "CORRUPT" : "OK");
+  Serial.printf("  file on card: %s\n", path);
+  Serial.println(heapFail ? "=== IMU SD WRITE TEST: HEAP CORRUPTED (SdFat write path is the corruptor) ==="
+                           : "=== IMU SD WRITE TEST: heap clean (SdFat 1 kHz write path is STABLE) ===");
+
+  for(;;)
+  {
+    delay(1000);
+    Serial.println("idle (test complete)");
+  }
+}
+#endif // IMU_SD_WRITE_TEST
+
 void setup() {
 
   M5.begin();
@@ -4295,6 +4457,12 @@ void setup() {
 #if IMU_SAMPLE_TEST
   // Run the standalone 1 kHz IMU-sampling test (no SD) and never return.
   imuSampleTest();
+  return;
+#endif
+
+#if IMU_SD_WRITE_TEST
+  // Run the standalone 1 kHz IMU -> SdFat 14 MB write test and never return.
+  imuSdWriteTest();
   return;
 #endif
 
