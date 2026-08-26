@@ -628,79 +628,70 @@ void GyroLogWriter::drainRing()
     if(!_file)
         return;
 
-    // Snapshot the available bytes out of the PSRAM ring into a local buffer,
-    // under the ring mutex. The sampler (loop task) is concurrently appending
-    // to the ring, so we must not let the SD/stdio write read directly from the
-    // ring: we copy the currently-available data out first, release the mutex,
-    // and only then hand the (now stable) local buffer to the SD write. This
-    // keeps the C stdio / SD path from ever touching memory the sampler is
-    // mutating, which is what was corrupting the internal heap.
+    // The SD/stdio write must not read directly from the PSRAM ring, because
+    // the sampler (loop task) is concurrently appending to it. So we copy the
+    // available bytes out of the ring, under the ring mutex, into a small
+    // INTERNAL-DRAM buffer, release the mutex, and only then hand that stable
+    // buffer to the SD write.
     //
-    // The snapshot buffer. 64 KB is too big for the writer task's stack, so it
-    // lives in the heap. We allocate it in PSRAM (the Core2 has 4 MB, plenty
-    // free) rather than internal DRAM: a 64 KB MALLOC_CAP_INTERNAL allocation
-    // fails on the Core2 (internal DRAM is too tight), which silently made every
-    // drain return early and left the ring pinned full. fwrite() reads the bytes
-    // from whatever pointer we hand it, so a PSRAM source buffer is fine.
-    static uint8_t* s_drainBuf = nullptr;
-    if(!s_drainBuf)
-        s_drainBuf = (uint8_t*)ps_malloc(kRingSize);
-    if(!s_drainBuf)
+    // The copy buffer is a single 4 KB block of *internal* DRAM (not PSRAM).
+    // The earlier 64 KB PSRAM source buffer turned out to be the corruptor:
+    // writing GCSV through the C stdio / VFS path from a PSRAM source overflowed
+    // an internal-heap buffer (GCSV bytes landing at 0x3f818400). A 4 KB
+    // internal source is what the clean 14 MB SD stress test used, so we match
+    // that. We drain the ring in 4 KB pieces, so we never need a bigger buffer.
+    static uint8_t* s_chunk = nullptr;
+    if(!s_chunk)
+        s_chunk = (uint8_t*)heap_caps_malloc(kChunkSize, MALLOC_CAP_INTERNAL);
+    if(!s_chunk)
     {
-        // [DIAG] If we ever can't get the snapshot buffer, say so once so it is
-        // not mistaken for a logic bug.
         static bool warned = false;
         if(!warned)
         {
             warned = true;
-            DEBUG_ERROR("[GYRO-DIAG] drainRing: ps_malloc(%lu) for snapshot FAILED (free internal=%lu, psram=%lu)",
-                (unsigned long)kRingSize, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+            DEBUG_ERROR("[GYRO-DIAG] drainRing: internal malloc(%lu) for chunk FAILED (free internal=%lu)",
+                (unsigned long)kChunkSize, (unsigned long)ESP.getFreeHeap());
         }
-        return; // can't snapshot; drop this drain (the ring will fill and drop)
+        return;
     }
 
-    size_t total = 0;
-    xSemaphoreTake(_ringMutex, portMAX_DELAY);
-    total = _ringCount;
-    if(total > 0)
+    // Drain the ring to the file in kChunkSize pieces. Each piece: take the
+    // mutex, copy up to kChunkSize bytes out of the (possibly wrapped) ring into
+    // s_chunk, advance the read pointer, release the mutex, then fwrite the
+    // stable internal buffer.
+    size_t totalDrained = 0;
+    for(;;)
     {
-        // Copy the available bytes out of the (possibly wrapped) ring into the
-        // contiguous local buffer.
-        size_t head = (kRingSize - _ringRead) < _ringCount ? (kRingSize - _ringRead) : _ringCount;
-        memcpy(s_drainBuf, _ring + _ringRead, head);
-        if(total > head)
-            memcpy(s_drainBuf + head, _ring, total - head);
-        // Advance the ring read pointer and clear the count.
-        _ringRead = (_ringRead + total) % kRingSize;
-        _ringCount = 0;
-    }
-    size_t countAfter = _ringCount;
-    xSemaphoreGive(_ringMutex);
+        size_t n = 0;
+        xSemaphoreTake(_ringMutex, portMAX_DELAY);
+        if(_ringCount > 0)
+        {
+            n = _ringCount < kChunkSize ? _ringCount : kChunkSize;
+            // Copy the next n bytes out of the (possibly wrapped) ring.
+            size_t head = (kRingSize - _ringRead) < n ? (kRingSize - _ringRead) : n;
+            memcpy(s_chunk, _ring + _ringRead, head);
+            if(n > head)
+                memcpy(s_chunk + head, _ring, n - head);
+            _ringRead = (_ringRead + n) % kRingSize;
+            _ringCount -= n;
+            totalDrained += n;
+        }
+        xSemaphoreGive(_ringMutex);
 
-    // [DIAG] Log what this drain actually removed. If total is large but the
-    // ring stays full, the zero isn't sticking (a race) or the sampler is
-    // refilling instantly.
+        if(n == 0)
+            break; // ring empty
+
+        // Write the stable internal buffer to the file.
+        _file.write(s_chunk, n);
+    }
+
+    // [DIAG] Log what this drain removed.
     static uint32_t lastDrainLog = 0;
     if(xTaskGetTickCount() - lastDrainLog >= 1000)
     {
         lastDrainLog = xTaskGetTickCount();
-        DEBUG_INFO("[GYRO-DIAG] drainRing: total=%lu countAfter=%lu ringRead=%lu ringWrite=%lu",
-            (unsigned long)total, (unsigned long)countAfter, (unsigned long)_ringRead, (unsigned long)_ringWrite);
-    }
-
-    if(total == 0)
-        return;
-
-    // Write the stable local snapshot to the file, in <= 4 KB chunks.
-    const size_t kChunk = 4096;
-    size_t off = 0;
-    while(off < total)
-    {
-        size_t thisLen = total - off;
-        if(thisLen > kChunk)
-            thisLen = kChunk;
-        _file.write(s_drainBuf + off, thisLen);
-        off += thisLen;
+        DEBUG_INFO("[GYRO-DIAG] drainRing: drained=%lu ringCount=%lu",
+            (unsigned long)totalDrained, (unsigned long)_ringCount);
     }
 #endif
 }

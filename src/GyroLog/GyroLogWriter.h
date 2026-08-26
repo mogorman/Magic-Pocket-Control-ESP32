@@ -161,6 +161,10 @@ private:
     // SD write. Rows are appended here by the sampler (loop task) and drained
     // to the file by the dedicated writer task.
     static const size_t kRingSize = 64 * 1024; // 64 KB
+    // Size of the internal-DRAM chunk buffer used to copy data out of the ring
+    // before the SD write. Kept small (4 KB) so the internal allocation always
+    // succeeds and the stdio write reads from a stable internal buffer.
+    static const size_t kChunkSize = 4096;
     char* _ring = nullptr;
     size_t _ringWrite = 0;  // next byte to write
     size_t _ringRead = 0;   // next byte to read
