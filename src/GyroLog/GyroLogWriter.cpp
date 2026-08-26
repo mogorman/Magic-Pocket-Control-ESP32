@@ -380,7 +380,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
     // Make sure the SD card is mounted before we try to open the file.
     if(!ensureSd())
+    {
+        DEBUG_INFO("[GYRO-DIAG] begin(): ensureSd FAILED (msg='%s')", _sdStatusMessage.c_str());
         return false;
+    }
+    DEBUG_INFO("[GYRO-DIAG] begin(): SD ready, cardSize=%lu", (unsigned long)SD.cardSize());
 
     // Sanitise the clip name (drops placeholder slate names like "Next Clip"
     // and replaces any file-name-unsafe characters). The caller falls back to a
@@ -403,11 +407,14 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     // instead of going through the VFS.
     char ffPath[160];
     snprintf(ffPath, sizeof(ffPath), "0:%s", path);
+    DEBUG_INFO("[GYRO-DIAG] begin(): f_open('%s') ...", ffPath);
     FRESULT res = f_open(&_ffFile, ffPath, FA_WRITE | FA_CREATE_ALWAYS);
     _ffOpen = (res == FR_OK);
     if(!_ffOpen)
         // FRESULT: 10=NOT_ENABLED 11=NO_FILE 12=NO_PATH 13=INVALID_NAME 14=INT_ERR
-        DEBUG_ERROR("[GYRO] f_open failed: res=%d path='%s'", (int)res, ffPath);
+        DEBUG_INFO("[GYRO-DIAG] begin(): f_open FAILED res=%d path='%s'", (int)res, ffPath);
+    else
+        DEBUG_INFO("[GYRO-DIAG] begin(): f_open OK");
     if(!_ffOpen)
         return false;
 #endif
