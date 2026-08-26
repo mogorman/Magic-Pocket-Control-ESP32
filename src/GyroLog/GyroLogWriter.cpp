@@ -406,10 +406,12 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _gcsvPath = path;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     // Open the GCSV file directly through FatFs (not the Arduino File / C stdio
-    // layer). The SD volume is mounted at "/sd", so the FatFs path is
-    // "/sd/<name>.gcsv". f_open with FA_CREATE_ALWAYS|FA_WRITE creates/truncates.
+    // layer). The SD library mounts the card on the FatFs drive "0:" (see
+    // sdcard_mount: drv = '0'+pdrv, pdrv=0 for the SD card), so the FatFs path is
+    // "0:<path>" -- NOT the VFS path "/sd<path>". f_open with
+    // FA_CREATE_ALWAYS|FA_WRITE creates/truncates the file.
     char fatfsPath[160];
-    snprintf(fatfsPath, sizeof(fatfsPath), "/sd%s", path);
+    snprintf(fatfsPath, sizeof(fatfsPath), "0:%s", path);
     _file = (FIL*)heap_caps_malloc(sizeof(FIL), MALLOC_CAP_INTERNAL);
     if(!_file)
         return false;
@@ -939,8 +941,10 @@ bool GyroLogWriter::rewriteTimestamp(const std::string& path, long epoch)
 // pass matches it. syncVolume() then commits the directory entry to the card.
 bool GyroLogWriter::setFileMtime(const std::string& path, long epoch)
 {
+    // f_utime is a raw FatFs call, so the path must use the FatFs drive "0:"
+    // (the SD card), not the VFS "/sd" mapping.
     char fatfsPath[160];
-    snprintf(fatfsPath, sizeof(fatfsPath), "/sd%s", path.c_str());
+    snprintf(fatfsPath, sizeof(fatfsPath), "0:%s", path.c_str());
 
     // Convert the UNIX epoch to the packed FAT date/time words.
     time_t t = (time_t)epoch;
