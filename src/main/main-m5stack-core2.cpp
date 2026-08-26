@@ -4047,12 +4047,8 @@ static void sdStressTest()
   const size_t kTotal = 14UL * 1024 * 1024; // 14 MB
   const char* path = "/sd/sdtest.bin";
 
-  if(!SD.begin(4))
-  {
-    Serial.println("SD.begin(4) FAILED");
-    for(;;) delay(1000);
-  }
-  Serial.printf("SD mounted. cardSize=%lu bytes\n", (unsigned long)SD.cardSize());
+  // M5.begin() already mounted the SD card; do NOT re-mount it.
+  Serial.printf("SD cardSize=%lu bytes\n", (unsigned long)SD.cardSize());
 
   // A 4096-byte pattern buffer with a distinct value per byte position so any
   // misalignment/overwrite is visible on read-back.
@@ -4088,11 +4084,8 @@ static void sdStressTest()
   Serial.printf("WRITE done: %lu bytes in %lu ms (~%lu KB/s)\n",
     (unsigned long)written, (unsigned long)tWrite, kbps);
 
-  // Force the directory entry + data to the card.
-  SD.end();
-  SD.begin(4);
-
   // ---- VERIFY PHASE: read it all back and check every byte ----
+  // (f.close() above already flushed the data; do NOT re-mount the SD.)
   File r = SD.open(path, FILE_READ);
   if(!r)
   {
