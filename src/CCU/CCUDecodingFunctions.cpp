@@ -919,6 +919,10 @@ void CCUDecodingFunctions::DecodeSlateForType(std::vector<byte> inData)
     std::vector<sbyte> data = CCUDecodingFunctions::ConvertPayloadDataWithExpectedCount<sbyte>(inData, 1);
     CCUPacketTypes::MetadataSlateForType slateForType = static_cast<CCUPacketTypes::MetadataSlateForType>(data[0]);
 
+    // [DEBUG] Slate type: 0 = NextClip (placeholder), 1 = PlaybackFile
+    DEBUG_INFO("[SLATE] type=%d (%s)", (int)slateForType,
+      slateForType == CCUPacketTypes::MetadataSlateForType::NextClip ? "NextClip" : "PlaybackFile");
+
     BMDControlSystem::getInstance()->getCamera()->onSlateTypeReceived(slateForType);
 }
 
@@ -934,6 +938,9 @@ void CCUDecodingFunctions::DecodeSlateForName(std::vector<byte> inData)
     if (std::regex_search(name, match, re)) {
         name = name.substr(match.position() + match.length());
     }
+
+    // [DEBUG] Slate name as received (raw, after any /mnt/sN/ strip).
+    DEBUG_INFO("[SLATE] name='%s' (len=%d)", name.c_str(), (int)name.size());
 
     BMDControlSystem::getInstance()->getCamera()->onSlateNameReceived(name);
 }
@@ -1037,6 +1044,11 @@ void CCUDecodingFunctions::TimecodeToString(std::vector<byte> timecodeBytes)
                       ((uint32_t)timecodeBytes[1] << 8) |
                       (uint32_t)timecodeBytes[0];
 
+    // [DEBUG] Raw timecode word (BCD) so we can see exactly what the camera
+    // sends. The top bit of the word is the drop-frame flag.
+    DEBUG_INFO("[TIMECODE] raw=0x%08X (drop=%d)", (unsigned)timecode,
+      (int)((timecode & kTimecodeDropFrameMask) > 0));
+
     std::string str = "";
     int digitCount = kTimecodeSize * 2;
     int shift = kTimecodeSize * 8 - 4;
@@ -1059,6 +1071,9 @@ void CCUDecodingFunctions::TimecodeToString(std::vector<byte> timecodeBytes)
 
         shift -= 4;
     }
+
+    // [DEBUG] Decoded timecode string.
+    DEBUG_INFO("[TIMECODE] str='%s'", str.c_str());
 
     BMDControlSystem::getInstance()->getCamera()->onTimecodeReceived(str);
 }

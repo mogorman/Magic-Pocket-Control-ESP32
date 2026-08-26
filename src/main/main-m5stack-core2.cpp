@@ -4027,10 +4027,11 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 void loop() {
 
+  // [GYRO LOGGING TEMPORARILY DISABLED for slate/timecode debugging]
   // Keep the gyro log sampling at ~1 kHz while a clip is being recorded. This
   // runs regardless of the 5 ms UI delay below so the sample cadence stays
   // tight. (No-op when not recording.)
-  gyroLog.poll();
+  // gyroLog.poll();
 
   static unsigned long lastConnectedTime = 0;
   const unsigned long reconnectInterval = 5000;  // 5 seconds (milliseconds)
@@ -4076,40 +4077,24 @@ void loop() {
           slate = cam->getSlateName();
         bool slateIsPlaceholder = (slate == "Next Clip" || slate == "next clip" || slate.empty());
 
+        // [GYRO LOGGING TEMPORARILY DISABLED for slate/timecode debugging]
+        // The slate name and timecode are logged here so we can see, on the
+        // serial console, exactly what the camera is sending around the
+        // moment a clip starts/stops.
+        DEBUG_INFO("== REC %s ==  slate='%s' (placeholder=%d)  timecode='%s'",
+          recording ? "START" : "STOP",
+          slate.c_str(),
+          (int)slateIsPlaceholder,
+          cam->getTimecodeString().c_str());
+
         if(recording)
         {
-          // Choose the .gcsv base name: the camera's slate name if it has a
-          // *real* one, otherwise a generic "clip_NNNN" name.
-          std::string clipName;
-          if(!slateIsPlaceholder)
-            clipName = slate;
-          if(clipName.empty())
-            clipName = nextGyroClipName();
-
-          // Turn the display off for the duration of the clip (the IMU is
-          // being sampled and written to the SD card).
-          tft.setBrightness(0);
-
-          gyroLog.begin(clipName, gyroVideoExtension(cam.get()), cam->getTimecodeString());
+          // (gyroLog.begin(...) disabled)
         }
         else
         {
-          // Capture the timecode at the moment recording stopped, then
-          // finalise the log (flush, close, populate the summary).
-          gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
-          gyroLog.end();
-
-          // The slate name the camera reports *now* (at the moment recording
-          // stopped) is the best name we have for the clip that was just
-          // recorded (the "previous" clip's slate). Apply it *after* the file
-          // has been finalised so the sample stream is never interrupted: this
-          // renames the .gcsv and updates the "videofilename" header line to
-          // match the real video file. No-op if the name is still the
-          // "Next Clip" placeholder.
-          gyroLog.applySlateName(slate, gyroVideoExtension(cam.get()));
-
-          // Bring the display back on and force a refresh of the (now
-          // summary) screen.
+          // (gyroLog.end() / applySlateName(...) disabled)
+          // Bring the display back on and force a refresh of the screen.
           tft.setBrightness(127);
           lastRefreshedScreen = 0;
         }

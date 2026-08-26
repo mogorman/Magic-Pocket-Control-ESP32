@@ -4,6 +4,7 @@
 #include <nvs.h>
 #include <math.h>
 #include <cstring>
+#include <time.h>
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -227,11 +228,28 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     if(!_file)
         return false;
 
-    // The GCSV "timestamp" field is documented as a UNIX timestamp and is
-    // optional (Gyroflow syncs on the "t" column, not this). We derive it from
-    // the camera's timecode at the moment recording started (whole seconds
-    // since midnight), and also record the raw timecode in "note".
-    long startSeconds = timecodeToSeconds(timecode);
+    // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
+    // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
+    // this). We build it from the camera's timecode (HH:MM:SS) mapped onto
+    // *today's* date, so the value is a real, current epoch rather than a
+    // seconds-since-midnight number (which Gyroflow would read as 1970, i.e.
+    // "26 years ago"). The raw timecode is also recorded in "note".
+    long startSeconds = timecodeToSeconds(timecode); // seconds since midnight, or -1
+    long timestampEpoch = 0;
+    if(startSeconds >= 0)
+    {
+        // Today's midnight as a UNIX timestamp, plus the timecode's
+        // seconds-since-midnight. Good enough for this optional informational
+        // field; Gyroflow does not rely on it for sync.
+        time_t now = time(nullptr);
+        struct tm tmv;
+        localtime_r(&now, &tmv);
+        tmv.tm_hour = 0;
+        tmv.tm_min = 0;
+        tmv.tm_sec = 0;
+        tmv.tm_isdst = -1;
+        timestampEpoch = mktime(&tmv) + startSeconds;
+    }
     char header[600];
     int n = snprintf(header, sizeof(header),
         "GYROFLOW IMU LOG\n"
@@ -249,7 +267,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         "t,gx,gy,gz,ax,ay,az\n",
         GyroLogWriter::orientationToken(_orientationIndex),
         timecode.c_str(),
-        (startSeconds >= 0) ? startSeconds : 0L,
+        timestampEpoch,
         _videoFileName.c_str(),
         kTscale,
         kGscale,
