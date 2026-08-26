@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <memory>
+#include <functional>
 #include "Arduino_DebugUtils.h"
 #include "Camera/BMDCamera.h"
 #include "CCU/CCUPacketTypes.h"
@@ -186,6 +187,10 @@ public:
     bool hasTransportMode();
     TransportInfo getTransportMode();
 
+    // Fired when the recording state changes (true = started recording, false = stopped).
+    // Optional; only invoked if a handler has been registered.
+    void setOnRecordingStateChanged(std::function<void(bool)> handler) { onRecordingStateChanged = std::move(handler); }
+
 
     // Metadata Attributes
 
@@ -355,6 +360,9 @@ private:
     // Display Attributes
     std::shared_ptr<CCUPacketTypes::DisplayTimecodeSource> timecodeSource;
     std::shared_ptr<std::string> timecode;
+
+    // Recording state change callback (optional)
+    std::function<void(bool)> onRecordingStateChanged;
 };
 
 #endif

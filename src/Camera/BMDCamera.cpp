@@ -948,6 +948,9 @@ void BMDCamera::onTransportModeReceived(TransportInfo inTransportMode)
         #if OUTPUT_CAMERA_SETTINGS == 1
             DEBUG_INFO(">>Recording:%s", isRecording ? "Yes" : "No");
         #endif
+
+        if(onRecordingStateChanged)
+            onRecordingStateChanged(isRecording);
     }
 }
 bool BMDCamera::hasTransportMode()

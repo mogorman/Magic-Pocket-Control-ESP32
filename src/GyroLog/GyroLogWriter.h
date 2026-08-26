@@ -1,0 +1,143 @@
+#ifndef GYROLOGWRITER_H
+#define GYROLOGWRITER_H
+
+#include <Arduino.h>
+#include <string>
+#include <cstdint>
+#include "FS.h" // for File / SD
+
+// GCSV (Gyroflow CSV) logger for the M5Stack Core2.
+//
+// Records the onboard MPU6886 gyro + accelerometer while a clip is being
+// recorded on the connected Blackmagic camera, and writes a sidecar
+// "<clipname>.gcsv" file to the microSD card. The file name matches the
+// video file (e.g. "A001C001_001.braw" -> "A001C001_001.gcsv").
+//
+// The GCSV format is documented at:
+//   https://docs.gyroflow.xyz/app/technical-details/gcsv-format
+//
+// The IMU is sampled at ~1 kHz (the MPU6886's native ODR, polled as fast as
+// the I2C bus allows). Data is quantised to fixed-point integers using the
+// gscale/ascale constants below, exactly as Gyroflow expects.
+
+class GyroLogWriter
+{
+public:
+    // The GCSV orientation token. This must match how the MPU6886 is physically
+    // mounted on the Core2. It is calibrated at runtime (see the Gyro Log
+    // screen) and persisted in NVS, so it survives reboots.
+    //
+    // The 24 possible tokens are the 6 axis permutations (X/Y/Z) x 4 sign
+    // combinations (x, y, z each +/-). The index 0..23 maps to a token via
+    // GYROLOG_ORIENTATION_TOKENS.
+    static const int kOrientationCount = 24;
+
+    enum class State : uint8_t
+    {
+        Idle = 0,
+        Recording = 1,
+        Finalizing = 2
+    };
+
+    // Summary of the most recently completed clip, shown on the Gyro Log screen.
+    struct Summary
+    {
+        bool valid = false;
+        std::string fileName;       // e.g. "A001C001_001.gcsv"
+        std::string videoFileName;  // e.g. "A001C001_001.braw"
+        uint32_t durationMs = 0;
+        std::string timecodeAtEnd;
+        uint64_t fileSizeBytes = 0;
+        uint64_t freeBytes = 0;
+        uint64_t totalBytes = 0;
+    };
+
+    // Begin a new log. Returns true on success (file opened, header written).
+    //   clipName  : base name without extension (e.g. "A001C001_001" or "clip_0001")
+    //   extension : the video extension (e.g. "braw", "mov")
+    //   timecode  : the camera timecode at the moment recording started
+    bool begin(const std::string& clipName, const std::string& extension, const std::string& timecode);
+
+    // Poll the IMU and append a sample if ~1 ms has elapsed since the last
+    // sample. Call this every loop() iteration while recording.
+    void poll();
+
+    // Finalise the current log: flush, close, and (if a slate name arrived
+    // after we started with a generic name) rename the file. Populates the
+    // summary. Returns true if a log was active and finalised.
+    bool end();
+
+    // If we started with a generic name and a real slate name has since
+    // arrived, rename the in-progress file to match. Call periodically while
+    // recording (cheap no-op if nothing to do).
+    void maybeRenameFromSlate(const std::string& slateName, const std::string& extension);
+
+    State state() const { return _state; }
+    bool isRecording() const { return _state == State::Recording; }
+
+    const Summary& getSummary() const { return _summary; }
+
+    // ---- Orientation (calibration) ----
+    // Returns the current orientation token index (0..23).
+    int getOrientationIndex() const { return _orientationIndex; }
+    // Set the orientation token index (0..23) and persist it to NVS.
+    void setOrientationIndex(int index);
+    // The GCSV orientation string for a given index (e.g. "YxZ").
+    static const char* orientationToken(int index);
+    // Load the persisted orientation index from NVS (call once at startup).
+    void loadOrientation();
+
+    // ---- IMU access (used by the calibration screen) ----
+    // Read the current gyro (rad/s) and accel (g). Returns true on success.
+    bool readImu(float* gx, float* gy, float* gz, float* ax, float* ay, float* az);
+
+private:
+    State _state = State::Idle;
+
+    // The file we are writing (only valid while recording/finalizing).
+    File _file;
+
+    // The name we started with (may be a generic "clip_NNNN").
+    std::string _startedName;
+    std::string _extension;
+
+    // Whether we have already renamed from a generic name to a slate name.
+    bool _renamedFromSlate = false;
+
+    // Timing: t is the elapsed ms since the clip started.
+    uint32_t _tMs = 0;
+    uint32_t _lastSampleMicros = 0;
+
+    // The PSRAM ring buffer that decouples the 1 kHz IMU read from the slower
+    // SD write. Rows are appended here and drained to the file in chunks.
+    static const size_t kRingSize = 64 * 1024; // 64 KB
+    char* _ring = nullptr;
+    size_t _ringWrite = 0;  // next byte to write
+    size_t _ringRead = 0;   // next byte to read
+    size_t _ringCount = 0; // bytes currently buffered
+
+    // The GCSV orientation token index (0..23), persisted in NVS.
+    int _orientationIndex = 0;
+
+    // The summary of the most recently completed clip.
+    Summary _summary;
+
+    // NVS keys for persisting the orientation.
+    static const char* kNvsNamespace;
+    static const char* kNvsKeyOrientation;
+
+    // Drain as much of the ring buffer as possible to the file.
+    void drainRing();
+
+    // Allocate the ring buffer in PSRAM. Returns true on success.
+    bool allocRing();
+
+    // Persist / load the orientation index via NVS.
+    void saveOrientation();
+};
+
+// The 24 GCSV orientation tokens, indexed by orientation index (0..23).
+// Order: for each of the 6 permutations of (x,y,z) axes, 4 sign combos.
+extern const char* const GYROLOG_ORIENTATION_TOKENS[GyroLogWriter::kOrientationCount];
+
+#endif // GYROLOGWRITER_H
