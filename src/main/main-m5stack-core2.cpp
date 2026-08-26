@@ -36,6 +36,9 @@
 #include <M5Unified.h>
 #include <SD.h> // microSD card (Core2) - must be included before M5GFX per the library note
 
+#include "GyroLog/gyro_imu.h"
+#include "GyroLog/gyro_ring.h"
+
 #define tft M5.Lcd
 static LGFX_Sprite *sprite;
 
@@ -190,6 +193,54 @@ bool btnBPressed = false;
 // Gyro log (GCSV) writer for the Core2's MPU6886. Records gyro + accel to a
 // .gcsv sidecar file on the microSD card while a clip is being recorded.
 GyroLogWriter gyroLog;
+
+// ---- Interrupt-driven 1 kHz IMU sampling ----------------------------------
+//
+// The MPU6886 is sampled by its own on-chip FIFO, drained from the I2C hardware
+// interrupt (GyroLog/mini_i2c.c + gyro_imu.c). That ISR is the *producer*: it
+// calls gyro_imu's sample callback for every sample, which we forward into a
+// small lock-free ring (GyroLog/gyro_ring.c). This task is the *consumer*: it
+// drains the ring and hands each sample to the GCSV writer (gyroLog.pushSample)
+// at the sensor's true 1 kHz rate, independent of the main loop.
+//
+// The task runs at the highest available priority so it keeps up with the
+// producer even while the UI/BLE are busy. It is created once at startup and
+// stays alive; when not recording, gyroLog.pushSample() is a no-op and the
+// samples are simply dropped.
+
+// The I2C-interrupt producer callback: store the sample in the ring.
+static void gyroImuSampleCb(uint32_t duration_ns,
+                             int16_t gx, int16_t gy, int16_t gz,
+                             int16_t ax, int16_t ay, int16_t az)
+{
+  gyro_ring_push(duration_ns, gx, gy, gz, ax, ay, az);
+}
+
+// The consumer task: drain the ring into the GCSV writer.
+static void gyroSamplingTask(void* arg)
+{
+  (void)arg;
+  for(;;)
+  {
+    gyro_ring_sample_t s;
+    if(gyro_ring_pop(&s))
+      gyroLog.pushSample(s.duration_ns, s.gx, s.gy, s.gz, s.ax, s.ay, s.az);
+    else
+      vTaskDelay(1); // nothing buffered; yield briefly
+  }
+}
+
+// Start the interrupt-driven IMU sampling and the consumer task. Called once
+// at startup. Returns true on success.
+static bool gyroImuStartSampling()
+{
+  if(!gyro_ring_init(1024))
+    return false;
+  if(!gyro_imu_start(gyroImuSampleCb))
+    return false;
+  xTaskCreate(gyroSamplingTask, "gyroSample", 4096, NULL, configMAX_PRIORITIES - 1, NULL);
+  return true;
+}
 
 // The generic clip-name counter used when the camera hasn't sent a slate name
 // yet (e.g. "clip_0001"). Persisted in NVS so it keeps incrementing across
@@ -3946,13 +3997,17 @@ void Screen_GyroLog(bool forceRefresh = false)
   else
   {
     // Calibration mode: show the live IMU values and the current orientation.
-    // We use M5Unified's calibrated, axis-ordered getGyro()/getAccel() here (not
-    // gyroLog.readImu, which reads the raw registers directly) so the numbers
-    // shown match what the user sees for orientation. The 256 us throttle in
-    // those getters is fine for a calibration display.
+    // We read the MPU6886 directly through our own interrupt-driven driver
+    // (gyro_imu_read_now), because M5Unified's IMU is bypassed (see setup()) so
+    // the same sensor is the one being sampled for the GCSV log. The values are
+    // returned already scaled (gyro in rad/s, accel in g), matching what the
+    // GCSV log records, so the orientation the user picks here is the one that
+    // applies to the recorded data.
     float gx, gy, gz, ax, ay, az;
-    M5.Imu.getGyro(&gx, &gy, &gz);
-    M5.Imu.getAccel(&ax, &ay, &az);
+    if(!gyro_imu_read_now(&gx, &gy, &gz, &ax, &ay, &az))
+    {
+      gx = gy = gz = ax = ay = az = 0.0f;
+    }
 
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("GYRO (rad/s)", 30, 40, &Lato_Regular5pt7b);
@@ -3994,7 +4049,17 @@ void Screen_GyroLog(bool forceRefresh = false)
 
 void setup() {
 
-  M5.begin();
+  // Bypass M5Unified's internal IMU and RTC init. The gyro logger owns the
+  // internal I2C bus (I2C_NUM_1, SDA=G21/SCL=G22) through its own
+  // interrupt-driven driver (see GyroLog/mini_i2c.c), so M5Unified must not
+  // configure the MPU6886 (M5.Imu) or the RTC8563 (M5.Rtc) on the same bus.
+  // The GCSV timestamp is derived from the camera's timecode (not the RTC), and
+  // the calibration screen reads the IMU via gyro_imu_read_now(), so neither
+  // M5Unified IMU/RTC feature is needed.
+  m5::M5Unified::config_t m5cfg;
+  m5cfg.internal_imu = false;
+  m5cfg.internal_rtc = false;
+  M5.begin(m5cfg);
 
   tft.setColorDepth(16);
   tft.setSwapBytes(true);
@@ -4057,6 +4122,14 @@ void setup() {
   loadGyroClipCounter();
   gyroLog.loadOrientation();
 
+  // Start the interrupt-driven 1 kHz IMU sampling (I2C ISR -> ring -> this
+  // consumer task -> gyroLog). It runs continuously; samples are only written
+  // to the GCSV file while a clip is being recorded (see the record callback).
+  if(gyroImuStartSampling())
+    DEBUG_INFO("[GYRO] IMU sampling started (1 kHz, interrupt-driven)");
+  else
+    DEBUG_ERROR("[GYRO] failed to start IMU sampling");
+
   // When the connected camera's recording state changes, start/stop the gyro
   // log. The camera object is created when a connection is established, so we
   // register the handler lazily in loop() once a camera exists (see below).
@@ -4067,10 +4140,8 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 void loop() {
 
-  // Keep the gyro log sampling at ~1 kHz while a clip is being recorded. This
-  // runs regardless of the 5 ms UI delay below so the sample cadence stays
-  // tight. (No-op when not recording.)
-  gyroLog.poll();
+  // (IMU sampling is no longer polled here: the interrupt-driven sampling task
+  //  created in setup() owns the 1 kHz cadence and feeds gyroLog directly.)
 
   static unsigned long lastConnectedTime = 0;
   const unsigned long reconnectInterval = 5000;  // 5 seconds (milliseconds)

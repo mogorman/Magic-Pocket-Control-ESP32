@@ -478,6 +478,48 @@ void GyroLogWriter::poll()
         drainRing();
 }
 
+void GyroLogWriter::pushSample(uint32_t duration_ns,
+                                int16_t gx, int16_t gy, int16_t gz,
+                                int16_t ax, int16_t ay, int16_t az)
+{
+    if(_state != State::Recording)
+        return;
+
+    // The IMU driver already scales the raw counts to the configured FSR
+    // (gyro +/-2000 dps, accel +/-8 g), which matches kGscale/kAscale exactly,
+    // so the raw 16-bit value *is* the fixed-point value Gyroflow expects.
+    long igx = gx;
+    long igy = gy;
+    long igz = gz;
+    long iax = ax;
+    long iay = ay;
+    long iaz = az;
+
+    // t is the real elapsed time in ms since the log started, accumulated from
+    // the measured inter-sample intervals (so it stays correct even if a sample
+    // is dropped or the rate jitters).
+    _tMs += (uint32_t)(duration_ns / 1000000);
+
+    char row[64];
+    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+        (unsigned long)_tMs, igx, igy, igz, iax, iay, iaz);
+
+    // Append to the ring buffer if there is room; otherwise drop (we never
+    // block the 1 kHz cadence on a full buffer).
+    if(_ringCount >= kRingSize)
+        return;
+    if(_ringCount + (size_t)n > kRingSize)
+        return;
+
+    memcpy(_ring + _ringWrite, row, (size_t)n);
+    _ringWrite = (_ringWrite + n) % kRingSize;
+    _ringCount += (size_t)n;
+
+    // Drain to the file if we have a decent chunk buffered.
+    if(_ringCount >= 4096)
+        drainRing();
+}
+
 void GyroLogWriter::drainRing()
 {
     if(_ringCount == 0 || !_file)

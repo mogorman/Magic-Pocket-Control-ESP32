@@ -71,6 +71,14 @@ public:
     // sample. Call this every loop() iteration while recording.
     void poll();
 
+    // Append a single IMU sample (raw 16-bit counts + measured inter-sample
+    // interval) to the log. Called by the dedicated sampling task from the
+    // interrupt-driven IMU driver, at the sensor's true 1 kHz rate. This is the
+    // production path (replaces the poll() pull model). No-op if not recording.
+    void pushSample(uint32_t duration_ns,
+                    int16_t gx, int16_t gy, int16_t gz,
+                    int16_t ax, int16_t ay, int16_t az);
+
     // Finalise the current log: flush, close, and (if a slate name arrived
     // after we started with a generic name) rename the file. Populates the
     // summary. Returns true if a log was active and finalised.
