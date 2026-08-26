@@ -412,12 +412,15 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _gcsvPath = path;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     // Open the GCSV file with the VFS open() syscall (NOT the Arduino File /
-    // newlib stdio). The VFS maps "/<name>.gcsv" onto the SD volume and the
-    // write() syscall routes straight to FatFs f_write with no newlib FILE buffer.
-    _fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    // newlib stdio). The SD volume is mounted at the VFS path "/sd", so the full
+    // path is "/sd/<name>.gcsv". The write() syscall routes straight to FatFs
+    // f_write with no newlib FILE buffer.
+    char vfsPath[160];
+    snprintf(vfsPath, sizeof(vfsPath), "/sd%s", path);
+    _fd = open(vfsPath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if(_fd < 0)
     {
-        DEBUG_INFO("[GYRO-DIAG] begin(): open() FAILED for '%s'", path);
+        DEBUG_INFO("[GYRO-DIAG] begin(): open() FAILED for '%s'", vfsPath);
         return false;
     }
     // [DIAG] Is the heap already corrupt right after the open (before any write)?
