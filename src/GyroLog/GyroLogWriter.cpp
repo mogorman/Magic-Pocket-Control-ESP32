@@ -582,13 +582,29 @@ void GyroLogWriter::drainRing()
 
     // Copy out the contiguous available bytes and write them. (No per-drain
     // flush(): data is committed by the flush()/close in end().)
+    //
+    // [DIAG] Write in small (<= 4 KB) chunks rather than one big write of the
+    // whole (up to 64 KB) ring. The first (header) write is clean but the
+    // repeated large drain writes corrupt the heap, so a large single File::write
+    // is the prime suspect. Chunking keeps each VFS write small.
+    const size_t kChunk = 4096;
     size_t head = (kRingSize - _ringRead) < _ringCount ? (kRingSize - _ringRead) : _ringCount;
     size_t total = _ringCount;
+    size_t off = 0;
 
-    if(head)
-        _file.write((const uint8_t*)(_ring + _ringRead), head);
-    if(total > head)
-        _file.write((const uint8_t*)(_ring + 0), total - head);
+    while(off < total)
+    {
+        // Source offset within the ring for this chunk (wraps at kRingSize).
+        size_t src = (_ringRead + off) % kRingSize;
+        size_t thisLen = total - off;
+        if(thisLen > kChunk)
+            thisLen = kChunk;
+        // Don't run past the end of the contiguous head region without wrapping.
+        if(src + thisLen > kRingSize)
+            thisLen = kRingSize - src;
+        _file.write((const uint8_t*)(_ring + src), thisLen);
+        off += thisLen;
+    }
 
     _ringRead = (_ringRead + total) % kRingSize;
     _ringCount = 0;
