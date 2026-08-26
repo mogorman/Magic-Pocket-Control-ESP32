@@ -495,40 +495,6 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         return false;
     }
 
-    // Create the ring mutex + data semaphore and start the dedicated writer
-    // task. The writer owns all SD/stdio work; the sampler (loop task) only does
-    // I2C + a memcpy into the PSRAM ring.
-    _ringMutex = xSemaphoreCreateMutex();
-    _dataSem = xSemaphoreCreateBinary();
-    _writerStop = false;
-    if(!_ringMutex || !_dataSem)
-    {
-        if(_ringMutex) vSemaphoreDelete(_ringMutex);
-        if(_dataSem) vSemaphoreDelete(_dataSem);
-        _ringMutex = nullptr;
-        _dataSem = nullptr;
-        heap_caps_free(_ring);
-        _ring = nullptr;
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        closeFile();
-#endif
-        return false;
-    }
-
-    if(!startWriterTask())
-    {
-        vSemaphoreDelete(_ringMutex);
-        vSemaphoreDelete(_dataSem);
-        _ringMutex = nullptr;
-        _dataSem = nullptr;
-        heap_caps_free(_ring);
-        _ring = nullptr;
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        closeFile();
-#endif
-        return false;
-    }
-
     _tMs = 0;
     _startMicros = micros();
     _lastSampleMicros = _startMicros;
@@ -592,41 +558,34 @@ void GyroLogWriter::poll()
         (unsigned long)_tMs, igx, igy, igz, iax, iay, iaz);
 
     // Append to the ring buffer if there is room; otherwise drop (we never
-    // block the 1 kHz cadence on a full buffer). The ring is shared with the
-    // writer task, so take the mutex around the append.
+    // block the 1 kHz cadence on a full buffer). This runs on the same task as
+    // the drain, so no locking is needed.
+    if(_ringCount < kRingSize && _ringCount + (size_t)n <= kRingSize)
     {
-        xSemaphoreTake(_ringMutex, portMAX_DELAY);
-        if(_ringCount < kRingSize && _ringCount + (size_t)n <= kRingSize)
-        {
-            memcpy(_ring + _ringWrite, row, (size_t)n);
-            _ringWrite = (_ringWrite + n) % kRingSize;
-            _ringCount += (size_t)n;
-        }
-        xSemaphoreGive(_ringMutex);
+        memcpy(_ring + _ringWrite, row, (size_t)n);
+        _ringWrite = (_ringWrite + n) % kRingSize;
+        _ringCount += (size_t)n;
     }
 
-    // Wake the dedicated writer task when a meaningful chunk has accumulated.
-    // The 1 kHz sampling fills the ring continuously; we nudge the writer at
-    // most once per 50 ms (20 Hz) and only once a decent chunk is present. The
-    // writer does the actual SD/stdio work on its own task, so this I2C-sampling
-    // task never touches the SD card or the C stdio layer.
-    bool gave = false;
+    // Drain the ring to the file, but rate-limit the writes. The 1 kHz sampling
+    // fills the ring continuously; we flush it at most once per 50 ms (20 Hz)
+    // and only once a decent chunk has accumulated. This runs on the same (loop)
+    // task as the I2C sampling -- there is no separate writer task. The write
+    // goes through the VFS write() syscall (no newlib stdio FILE buffer), which
+    // is what avoids the internal-heap corruption.
     if(now - _lastDrainMicros >= 50000 && _ringCount >= 1024)
     {
         _lastDrainMicros = now;
-        xSemaphoreGive(_dataSem);
-        gave = true;
+        drainRing();
     }
 
-    // [DIAG] Per-second: confirm the sampler is filling the ring and waking the
-    // writer. If ringCount stays ~0, the I2C read is failing; if it grows but
-    // the writer never drains, the writer task isn't running.
+    // [DIAG] Per-second: confirm the sampler is filling the ring and draining it.
     static uint32_t lastPollLog = 0;
     if(now - lastPollLog >= 1000000)
     {
         lastPollLog = now;
-        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms samples ringCount=%lu gave=%d i2cOK",
-            (unsigned long)_tMs, (unsigned long)_ringCount, (int)gave);
+        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms ringCount=%lu i2cOK",
+            (unsigned long)_tMs, (unsigned long)_ringCount);
     }
 }
 
@@ -636,28 +595,19 @@ void GyroLogWriter::drainRing()
     // [DIAG] No SD: just discard the buffered rows so the ring keeps turning.
     // This lets us test whether the 1 kHz IMU sampling alone (no SD writes)
     // corrupts the heap.
-    xSemaphoreTake(_ringMutex, portMAX_DELAY);
     _ringRead = 0;
     _ringWrite = 0;
     _ringCount = 0;
-    xSemaphoreGive(_ringMutex);
     return;
 #else
     if(_fd < 0)
         return;
 
-    // The SD write must not read directly from the PSRAM ring, because
-    // the sampler (loop task) is concurrently appending to it. So we copy the
-    // available bytes out of the ring, under the ring mutex, into a small
-    // INTERNAL-DRAM buffer, release the mutex, and only then hand that stable
-    // buffer to the SD write.
-    //
-    // The copy buffer is a single 4 KB block of *internal* DRAM (not PSRAM).
-    // The earlier 64 KB PSRAM source buffer turned out to be the corruptor:
-    // writing GCSV through the C stdio / VFS path from a PSRAM source overflowed
-    // an internal-heap buffer (GCSV bytes landing at 0x3f818400). A 4 KB
-    // internal source is what the clean 14 MB SD stress test used, so we match
-    // that. We drain the ring in 4 KB pieces, so we never need a bigger buffer.
+    // This runs on the same (loop) task as the sampler, so there is no
+    // concurrency to guard against -- no mutex needed. We copy the available
+    // bytes out of the (possibly wrapped) PSRAM ring into a small internal-DRAM
+    // buffer and write that to the file via the VFS write() syscall (routes to
+    // FatFs f_write, no newlib stdio FILE buffer). We drain in 4 KB pieces.
     static uint8_t* s_chunk = nullptr;
     if(!s_chunk)
         s_chunk = (uint8_t*)heap_caps_malloc(kChunkSize, MALLOC_CAP_INTERNAL);
@@ -673,31 +623,18 @@ void GyroLogWriter::drainRing()
         return;
     }
 
-    // Drain the ring to the file in kChunkSize pieces. Each piece: take the
-    // mutex, copy up to kChunkSize bytes out of the (possibly wrapped) ring into
-    // s_chunk, advance the read pointer, release the mutex, then fwrite the
-    // stable internal buffer.
     size_t totalDrained = 0;
-    for(;;)
+    while(_ringCount > 0)
     {
-        size_t n = 0;
-        xSemaphoreTake(_ringMutex, portMAX_DELAY);
-        if(_ringCount > 0)
-        {
-            n = _ringCount < kChunkSize ? _ringCount : kChunkSize;
-            // Copy the next n bytes out of the (possibly wrapped) ring.
-            size_t head = (kRingSize - _ringRead) < n ? (kRingSize - _ringRead) : n;
-            memcpy(s_chunk, _ring + _ringRead, head);
-            if(n > head)
-                memcpy(s_chunk + head, _ring, n - head);
-            _ringRead = (_ringRead + n) % kRingSize;
-            _ringCount -= n;
-            totalDrained += n;
-        }
-        xSemaphoreGive(_ringMutex);
-
-        if(n == 0)
-            break; // ring empty
+        size_t n = _ringCount < kChunkSize ? _ringCount : kChunkSize;
+        // Copy the next n bytes out of the (possibly wrapped) ring.
+        size_t head = (kRingSize - _ringRead) < n ? (kRingSize - _ringRead) : n;
+        memcpy(s_chunk, _ring + _ringRead, head);
+        if(n > head)
+            memcpy(s_chunk + head, _ring, n - head);
+        _ringRead = (_ringRead + n) % kRingSize;
+        _ringCount -= n;
+        totalDrained += n;
 
         // Write the stable internal buffer to the file via the VFS write()
         // syscall (routes to FatFs f_write, no newlib stdio FILE buffer).
@@ -716,85 +653,6 @@ void GyroLogWriter::drainRing()
 #endif
 }
 
-// ---- Dedicated SD writer task ----
-//
-// The writer task owns the File and does all SD/stdio work. It waits on the
-// binary _dataSem (given by the sampler when the ring has a chunk to flush) and
-// drains the ring to the file. Running this on its own FreeRTOS task keeps the
-// C stdio / SD path off the 1 kHz I2C-sampling task, which is what was
-// corrupting the internal heap.
-
-void GyroLogWriter::writerTaskTrampoline(void* param)
-{
-    GyroLogWriter* self = (GyroLogWriter*)param;
-    self->writerTask();
-    vTaskDelete(nullptr);
-}
-
-void GyroLogWriter::writerTask()
-{
-    // Wait for data (or the stop signal). The sampler gives _dataSem ~20 Hz
-    // while the ring has >= 1 KB. We also time out periodically so that, if
-    // the sampler stops giving (e.g. the ring never fills to the threshold), we
-    // still get a chance to notice the stop flag and to flush on end().
-    const TickType_t kWaitMs = pdMS_TO_TICKS(100);
-    // [DIAG] Per-second progress: how many drains this task has done, and the
-    // current ring occupancy, so we can tell whether the sampler is filling the
-    // ring and whether this task is actually running + draining.
-    uint32_t drains = 0;
-    uint32_t lastLog = xTaskGetTickCount();
-    for(;;)
-    {
-        if(_writerStop)
-            break;
-
-        // Wait for the sampler to signal data, or a 100 ms timeout.
-        if(xSemaphoreTake(_dataSem, kWaitMs) == pdTRUE)
-        {
-            // Data is queued: drain it to the file.
-            drainRing();
-            drains++;
-        }
-        else
-        {
-            // Timeout: nothing new, but check whether we were told to stop and,
-            // if we're being stopped, do a final flush of whatever is left.
-            if(_writerStop)
-            {
-                drainRing();
-                break;
-            }
-        }
-
-        if(xTaskGetTickCount() - lastLog >= 1000)
-        {
-            lastLog = xTaskGetTickCount();
-            DEBUG_INFO("[GYRO-DIAG] writerTask: drains=%lu ringCount=%lu (writer task IS running)",
-                (unsigned long)drains, (unsigned long)_ringCount);
-        }
-    }
-
-    // Final flush + close + directory sync, all on this (writer) task.
-    if(!_writerStop)
-    {
-        // Not stopped (shouldn't happen, but be safe): just drain.
-        drainRing();
-    }
-#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    if(_fd >= 0)
-    {
-        // Record the final size (current file offset = bytes written) before we
-        // close the descriptor.
-        off_t pos = lseek(_fd, 0, SEEK_CUR);
-        _finalFileSizeBytes = (pos >= 0) ? (uint64_t)pos : 0;
-        // Close, then commit the directory entry to the card.
-        close(_fd);
-        _fd = -1;
-        syncVolume();
-    }
-#endif
-}
-
 void GyroLogWriter::closeFile()
 {
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
@@ -804,50 +662,6 @@ void GyroLogWriter::closeFile()
         _fd = -1;
     }
 #endif
-}
-
-bool GyroLogWriter::startWriterTask()
-{
-    // A 8 KB stack is enough: the task only does small File::write calls and
-    // semaphore ops; the 64 KB drain snapshot lives in a heap buffer, not the
-    // stack. Priority 2 is just above the Arduino loop task (priority 1) so the
-    // writer can preempt to flush, but it is not high enough to starve the
-    // I2C sampling.
-    TaskHandle_t handle = nullptr;
-    // Pin the writer to core 1, away from the Arduino loop task (core 0) that
-    // does the 1 kHz I2C sampling. Now that the data path writes straight through
-    // FatFs (no newlib stdio FILE buffer), the two tasks no longer share the
-    // corrupting state, so keeping them on separate cores just avoids the writer
-    // preempting the sampling task.
-    BaseType_t ok = xTaskCreatePinnedToCore(
-        writerTaskTrampoline,
-        "gyrolog_sd",
-        8192,
-        this,
-        2,
-        &handle,
-        1);
-    if(ok != pdPASS)
-        return false;
-    _writerTask = handle;
-    return true;
-}
-
-void GyroLogWriter::stopWriterTask()
-{
-    if(!_writerTask)
-        return;
-
-    // Ask the writer to stop and wake it so it sees the flag immediately.
-    _writerStop = true;
-    xSemaphoreGive(_dataSem);
-
-    // Join the task (block until it has deleted itself). end() runs on the loop
-    // task; waiting here is fine because the writer only does a final drain +
-    // close + sync, which is quick.
-    vTaskDelete(_writerTask);
-    (void)0;
-    _writerTask = nullptr;
 }
 
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
@@ -1051,16 +865,22 @@ bool GyroLogWriter::end()
     if(_state != State::Recording)
         return false;
 
-    // Stop the dedicated writer task first. It performs the final drain of the
-    // ring, the file flush + close, and the directory sync -- all on the writer
-    // task, NOT on this (loop) task. This is the whole point of the redesign:
-    // the C stdio / SD close+sync (the operation that used to corrupt the heap
-    // when run on the loop task right after 1 kHz I2C sampling) now runs on a
-    // separate task that has been doing nothing but SD work.
-    stopWriterTask();
+    // Final drain of any remaining samples, then close the file and commit the
+    // directory entry to the card. All on this (loop) task -- there is no
+    // separate writer task.
+    drainRing();
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
+    if(_fd >= 0)
+    {
+        off_t pos = lseek(_fd, 0, SEEK_CUR);
+        _finalFileSizeBytes = (pos >= 0) ? (uint64_t)pos : 0;
+        close(_fd);
+        _fd = -1;
+        syncVolume();
+    }
+#endif
 
-    // Capture the summary. The file was closed by the writer task, so the size
-    // is the value we recorded just before closing (_finalFileSizeBytes).
+    // Capture the summary.
     _summary.valid = true;
     _summary.fileName = _startedName + ".gcsv";
     _summary.videoFileName = _videoFileName;
@@ -1077,16 +897,6 @@ bool GyroLogWriter::end()
         // must be freed with heap_caps_free, NOT vPortFree.
         heap_caps_free(_ring);
         _ring = nullptr;
-    }
-    if(_ringMutex)
-    {
-        vSemaphoreDelete(_ringMutex);
-        _ringMutex = nullptr;
-    }
-    if(_dataSem)
-    {
-        vSemaphoreDelete(_dataSem);
-        _dataSem = nullptr;
     }
 
     _state = State::Idle;
