@@ -592,10 +592,23 @@ void GyroLogWriter::poll()
     // most once per 50 ms (20 Hz) and only once a decent chunk is present. The
     // writer does the actual SD/stdio work on its own task, so this I2C-sampling
     // task never touches the SD card or the C stdio layer.
+    bool gave = false;
     if(now - _lastDrainMicros >= 50000 && _ringCount >= 1024)
     {
         _lastDrainMicros = now;
         xSemaphoreGive(_dataSem);
+        gave = true;
+    }
+
+    // [DIAG] Per-second: confirm the sampler is filling the ring and waking the
+    // writer. If ringCount stays ~0, the I2C read is failing; if it grows but
+    // the writer never drains, the writer task isn't running.
+    static uint32_t lastPollLog = 0;
+    if(now - lastPollLog >= 1000000)
+    {
+        lastPollLog = now;
+        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms samples ringCount=%lu gave=%d i2cOK",
+            (unsigned long)_tMs, (unsigned long)_ringCount, (int)gave);
     }
 }
 
@@ -688,6 +701,11 @@ void GyroLogWriter::writerTask()
     // the sampler stops giving (e.g. the ring never fills to the threshold), we
     // still get a chance to notice the stop flag and to flush on end().
     const TickType_t kWaitMs = pdMS_TO_TICKS(100);
+    // [DIAG] Per-second progress: how many drains this task has done, and the
+    // current ring occupancy, so we can tell whether the sampler is filling the
+    // ring and whether this task is actually running + draining.
+    uint32_t drains = 0;
+    uint32_t lastLog = xTaskGetTickCount();
     for(;;)
     {
         if(_writerStop)
@@ -698,6 +716,7 @@ void GyroLogWriter::writerTask()
         {
             // Data is queued: drain it to the file.
             drainRing();
+            drains++;
         }
         else
         {
@@ -708,6 +727,13 @@ void GyroLogWriter::writerTask()
                 drainRing();
                 break;
             }
+        }
+
+        if(xTaskGetTickCount() - lastLog >= 1000)
+        {
+            lastLog = xTaskGetTickCount();
+            DEBUG_INFO("[GYRO-DIAG] writerTask: drains=%lu ringCount=%lu (writer task IS running)",
+                (unsigned long)drains, (unsigned long)_ringCount);
         }
     }
 
