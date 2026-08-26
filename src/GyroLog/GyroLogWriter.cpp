@@ -6,43 +6,36 @@
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
-// Each token is a 3-character string. The characters are the sensor axes
-// (X, Y, Z) in the order they map to the GCSV gx/gy/gz columns, with a
-// leading '-' on a character meaning that axis is inverted.
+// A GCSV orientation token is a 3-character string. Each character is one of
+// the sensor axes (X, Y, Z) and the characters are listed in the order they
+// map to the GCSV gx / gy / gz columns. A lower-case character means that
+// axis is inverted (e.g. "xYz" = gx from -X, gy from +Y, gz from -Z).
 //
-// Layout: 6 axis permutations, each with 4 sign combinations (x, y, z).
-//   permutation 0: X Y Z
-//   permutation 1: X Z Y
-//   permutation 2: Y X Z
-//   permutation 3: Y Z X
-//   permutation 4: Z X Y
-//   permutation 5: Z Y X
-// For each permutation the 4 sign combos are: + + +, + + -, + - +, - + +
-// (i.e. the sign of the third axis is the one that varies last).
+// This table is the full set of 24 right-handed orientation tokens (6 axis
+// permutations x 4 sign combinations), in a fixed order so the A/B buttons can
+// step through them deterministically. The index is what is persisted in NVS.
 const char* const GYROLOG_ORIENTATION_TOKENS[GyroLogWriter::kOrientationCount] =
 {
-    // X Y Z
-    "XYZ", "XZy", "XYz", "xYZ",
-    // X Z Y
-    "XZY", "XYZ", "XZy", "xZY",
-    // Y X Z
-    "YZX", "YXZ", "YZx", "yXZ",
-    // Y Z X
-    "YZX", "YXZ", "YZx", "yXZ",
-    // Z X Y
-    "ZXY", "ZYX", "ZXy", "zXY",
-    // Z Y X
-    "ZYX", "ZXY", "ZYx", "zYX"
+    // Permutation X Y Z
+    "XYZ", "XyZ", "XYz", "xYz",
+    // Permutation X Z Y
+    "XZY", "XzY", "XZy", "xZy",
+    // Permutation Y X Z
+    "YXZ", "YxZ", "YXz", "yXz",
+    // Permutation Y Z X
+    "YZX", "YzX", "YZx", "yZx",
+    // Permutation Z X Y
+    "ZXY", "ZxY", "ZXy", "zXy",
+    // Permutation Z Y X
+    "ZYX", "ZyX", "ZYx", "zYx"
 };
 
-// NOTE: The tokens above are a placeholder mapping so the calibration UI can
-// step through all 24 possibilities. The exact physical meaning of each token
-// is determined empirically: the user lays the unit flat, reads the live
-// gyro/accel numbers on the Gyro Log screen, and picks the token that makes
-// the axes line up with "screen facing up and flat". That choice is persisted
-// in NVS. The GCSV spec only requires the token to be one of the 24
-// right-handed orientation strings; Gyroflow uses it to rotate the data into
-// the camera's frame.
+// The orientation is calibrated empirically: the user lays the unit flat,
+// reads the live gyro/accel numbers on the Gyro Log screen, and steps through
+// these tokens with the A/B buttons until the token matches how the MPU6886 is
+// physically mounted (screen facing up and flat). The chosen index is
+// persisted in NVS. Gyroflow uses the token to rotate the data into the
+// camera's frame, so the token must describe the sensor's real orientation.
 //
 // gscale: raw gyro (deg/s) -> rad/s. MPU6886 is configured +/-2000 deg/s.
 //   gscale = (2000 * PI / 180) / 32768

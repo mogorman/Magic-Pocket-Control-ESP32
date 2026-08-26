@@ -3917,15 +3917,19 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString(aBuf, 30, 108, &Lato_Regular11pt7b);
 
-    // Current orientation token
+    // Current orientation token (with its index, so it can be reported back)
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("ORIENTATION", 30, 150, &Lato_Regular5pt7b);
     sprite->setTextColor(TFT_CYAN);
-    sprite->drawString(GyroLogWriter::orientationToken(gyroLog.getOrientationIndex()), 30, 163, &Lato_Regular11pt7b);
+    char orientBuf[24];
+    snprintf(orientBuf, sizeof(orientBuf), "%s  (#%d)",
+      GyroLogWriter::orientationToken(gyroLog.getOrientationIndex()),
+      gyroLog.getOrientationIndex());
+    sprite->drawString(orientBuf, 30, 163, &Lato_Regular11pt7b);
 
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Lay flat, then use A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
+    sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
   }
 
   sprite->pushSprite(0, 0);
