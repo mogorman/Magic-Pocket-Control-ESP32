@@ -32,3 +32,11 @@ void gyro_imu_stop(void);
 // read of the data registers. Used by the calibration screen. Returns true on
 // success.
 bool gyro_imu_read_now(float* gx, float* gy, float* gz, float* ax, float* ay, float* az);
+
+// Diagnostic: read back the ODR-relevant registers (SMPLRT_DIV, CONFIG/DLPF,
+// PWR_MGMT_1, FIFO_EN) and measure the *actual* sample rate by counting how
+// many samples the FIFO accumulates over a one-second window. Prints the
+// results to serial. Returns the measured ODR in Hz (0 on failure). Call once
+// at startup, after gyro_imu_start(), to confirm the sensor is really running
+// at 1 kHz.
+uint32_t gyro_imu_measure_odr(void);

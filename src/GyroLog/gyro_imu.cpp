@@ -41,6 +41,7 @@
 #define REG_USER_CONTROL  0x6A
 #define REG_PWR_MGMT_1    0x6B
 #define REG_FIFO_COUNT_H  0x72
+#define REG_FIFO_COUNT_L  0x73
 #define REG_FIFO_RW       0x74
 #define REG_WHO_AM_I      0x75
 
@@ -217,4 +218,85 @@ bool gyro_imu_read_now(float* gx, float* gy, float* gz, float* ax, float* ay, fl
     *gy = (int16_t)((buf[10] << 8) | buf[11]) * GYRO_DPS_PER_LSB * (3.14159265f / 180.0f);
     *gz = (int16_t)((buf[12] << 8) | buf[13]) * GYRO_DPS_PER_LSB * (3.14159265f / 180.0f);
     return true;
+}
+
+// Read a single MPU6886 register. Returns true on success.
+static bool read_reg(uint8_t reg, uint8_t* out) {
+    return mini_i2c_read_reg_sync(MPU6886_ADDR, reg, out, 1) == ESP_OK;
+}
+
+// Diagnostic: confirm the sensor's *actual* output data rate.
+//
+// The GCSV log's "t" column only reflects how fast *we* drain the FIFO, so it
+// can't tell us whether the sensor is really producing 1 kHz samples. The
+// authoritative check is the FIFO itself: with the FIFO enabled, the sensor
+// appends one 14-byte sample per ODR tick, so the number of samples that
+// accumulate in the FIFO over a fixed wall-clock window equals the ODR.
+//
+// We measure over a 1 s window (long enough to be accurate, short enough to
+// not fill the 1024-byte FIFO, which holds ~73 samples at 1 kHz). We also
+// read back the ODR-relevant registers so the log shows exactly what the
+// sensor is configured to.
+uint32_t gyro_imu_measure_odr(void) {
+    uint8_t smplrt = 0, config = 0, pwr1 = 0, fifo_en = 0, who = 0;
+    read_reg(REG_SMPLRT_DIV, &smplrt);
+    read_reg(REG_CONFIG, &config);
+    read_reg(REG_PWR_MGMT_1, &pwr1);
+    read_reg(REG_FIFO_EN, &fifo_en);
+    read_reg(REG_WHO_AM_I, &who);
+
+    // The DLPF (CONFIG bits 0-2) that pairs with a 1 kHz ODR on the MPU6886.
+    const char* dlpf = "??";
+    switch (config & 0x07) {
+        case 0x00: dlpf = "98Hz";  break;
+        case 0x01: dlpf = "42Hz";  break;
+        case 0x02: dlpf = "20Hz";  break;
+        case 0x03: dlpf = "104Hz"; break;
+        case 0x04: dlpf = "188Hz"; break;
+        case 0x05: dlpf = "250Hz"; break;
+        case 0x06: dlpf = "304Hz"; break;
+        case 0x07: dlpf = "356Hz"; break;
+        default:   dlpf = "??";    break;
+    }
+
+    printf("[GYRO-ODR] whoami=0x%02X  SMPLRT_DIV=%u  CONFIG=0x%02X (DLPF=%s)  "
+           "PWR_MGMT_1=0x%02X (clk=%u sleep=%d)  FIFO_EN=0x%02X\n",
+           who, smplrt, config, dlpf, pwr1,
+           (pwr1 >> 0) & 0x07, (pwr1 >> 6) & 0x01, fifo_en);
+
+    // Measure the FIFO fill rate over a 1 s window.
+    //
+    // We must stop the ISR-driven drain first: while s_running is true the I2C
+    // interrupt keeps emptying the FIFO, so it would never accumulate. Set
+    // s_running false to freeze the drain, reset the FIFO, wait 1 s (during
+    // which the sensor keeps appending at its ODR), then read the count.
+    //
+    // This is a one-shot diagnostic, so briefly stalling the drain is harmless;
+    // we restore s_running afterwards.
+    bool was_running = s_running;
+    s_running = false;
+    mini_i2c_write_reg_sync(MPU6886_ADDR, REG_USER_CONTROL, UC_FIFO_RESET);
+
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    uint8_t ch = 0, cl = 0;
+    int16_t count = 0;
+    if (mini_i2c_read_reg_sync(MPU6886_ADDR, REG_FIFO_COUNT_H, &ch, 1) == ESP_OK &&
+        mini_i2c_read_reg_sync(MPU6886_ADDR, REG_FIFO_COUNT_L, &cl, 1) == ESP_OK) {
+        count = (int16_t)(((int)ch << 8) | cl);
+    }
+
+    // The FIFO holds 1024 bytes = 73 samples. If we see more than that we
+    // wrapped; report the raw count but flag it.
+    bool wrapped = (count > 73);
+    uint32_t odr = (uint32_t)count;  // samples in 1 s == Hz
+
+    printf("[GYRO-ODR] FIFO count after 1s = %d  =>  measured ODR = %u Hz%s\n",
+           count, odr, wrapped ? "  (FIFO wrapped; ODR > ~73 Hz, value is a floor)" : "");
+
+    // Reset the FIFO and resume the normal drain.
+    mini_i2c_write_reg_sync(MPU6886_ADDR, REG_USER_CONTROL, UC_FIFO_RESET);
+    s_running = was_running;
+
+    return odr;
 }

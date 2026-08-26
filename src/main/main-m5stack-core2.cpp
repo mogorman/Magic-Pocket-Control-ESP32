@@ -4130,6 +4130,12 @@ void setup() {
   else
     DEBUG_ERROR("[GYRO] failed to start IMU sampling");
 
+  // One-shot ODR diagnostic: confirm the MPU6886 is actually producing 1 kHz
+  // samples (the GCSV "t" column only shows our drain rate, not the sensor's
+  // true ODR). Prints the ODR-relevant registers and a 1 s FIFO count to
+  // serial. Harmless to run every boot; it briefly stalls the drain for ~1 s.
+  gyro_imu_measure_odr();
+
   // When the connected camera's recording state changes, start/stop the gyro
   // log. The camera object is created when a connection is established, so we
   // register the handler lazily in loop() once a camera exists (see below).
