@@ -2,7 +2,13 @@
 #define USING_M5GFX 0             // Using the M5GFX library with touch screen
 #define USING_M5_BUTTONS 1        // Using the M5GFX library with the 3 buttons (buttons A, B, C)
 
-#define OUTPUT_CAMERA_SETTINGS 1  // 1 = Outputs camera settings through serial (so other applications can read them)
+#define OUTPUT_CAMERA_SETTINGS 0  // 1 = Outputs camera settings through serial (so other applications can read them)
+
+// 1 = keep the always-on CCU debug (per-packet text+hex dump, slate decode
+// prints, verbose log level). 0 = quiet: the debug is off so it doesn't eat
+// CPU while the gyro log is sampling the IMU at 1 kHz. The one-shot [GYRO]
+// clip-name logs are left in place either way.
+#define GYROLOG_DEBUG 0
 
 // The output format is: >>[state]:[state value]
 // Here are some examples:
@@ -3940,8 +3946,13 @@ void Screen_GyroLog(bool forceRefresh = false)
   else
   {
     // Calibration mode: show the live IMU values and the current orientation.
+    // We use M5Unified's calibrated, axis-ordered getGyro()/getAccel() here (not
+    // gyroLog.readImu, which reads the raw registers directly) so the numbers
+    // shown match what the user sees for orientation. The 256 us throttle in
+    // those getters is fine for a calibration display.
     float gx, gy, gz, ax, ay, az;
-    gyroLog.readImu(&gx, &gy, &gz, &ax, &ay, &az);
+    M5.Imu.getGyro(&gx, &gy, &gz);
+    M5.Imu.getAccel(&ax, &ay, &az);
 
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("GYRO (rad/s)", 30, 40, &Lato_Regular5pt7b);
@@ -4023,8 +4034,14 @@ void setup() {
   esp_sleep_enable_ext0_wakeup(GPIO_NUM_38, LOW);
   */
 
-  // SET DEBUG LEVEL
+  // SET DEBUG LEVEL. GYROLOG_DEBUG=1 keeps everything verbose (for debugging);
+  // otherwise we log at INFO so the per-packet and per-setting debug output is
+  // suppressed (it would otherwise eat CPU while the gyro log samples at 1 kHz).
+  #if GYROLOG_DEBUG
   Debug.setDebugLevel(DBG_VERBOSE);
+  #else
+  Debug.setDebugLevel(DBG_INFO);
+  #endif
   Debug.timestampOn();
 
   // Allow a timeout of 30 seconds for time for the pass key entry. It's slower with buttons

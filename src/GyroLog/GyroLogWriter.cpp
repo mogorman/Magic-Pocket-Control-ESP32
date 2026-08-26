@@ -7,6 +7,12 @@
 #include <time.h>
 #include "Arduino_DebugUtils.h"
 
+// FatFs, for setting a file's modification time (f_utime). The SD library is
+// built on FatFs, so ff.h is on the include path.
+extern "C" {
+#include "ff.h"
+}
+
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
 // A GCSV orientation token is a 3-character string. Each character is one of
@@ -50,6 +56,12 @@ static const float kAscale = 8.0f / 32768.0f;
 // tscale: t is in ms, so seconds = t * 0.001
 static const char* kTscale = "0.001";
 
+// The year assumed for a clip's date until the real date is learned from the
+// clip's file name. The camera's timecode gives a time-of-day but no date, and
+// the file name only carries MMDDHHMM (no year), so a fixed default year is
+// used for the initial GCSV timestamp and is corrected once the name is known.
+static const int kDefaultYear = 2026;
+
 // Convert a camera timecode string ("HH:MM:SS:FF" or drop-frame "HH:MM:SS;FF")
 // to whole seconds since midnight. Returns -1 if the string can't be parsed.
 // The frame field is ignored (the GCSV "timestamp" is a whole-second value and
@@ -76,17 +88,53 @@ static long timecodeToSeconds(const std::string& tc)
     return (long)h * 3600 + (long)m * 60 + s;
 }
 
+// Parse the date embedded in a BMD clip file name. The camera names clips like
+// "A001_08260603_C011", where the second field is MMDDHHMM (month, day, hour,
+// minute) -- e.g. 08260603 = Aug 26, 06:03. The year is not in the name, so the
+// caller supplies it (2026 by default). On success it fills *year, *month,
+// *day, *hour, *minute and returns true.
+static bool parseClipNameDate(const std::string& name, int* year, int* month, int* day, int* hour, int* minute)
+{
+    // Find the first underscore; the date is the field that follows it.
+    size_t u = name.find('_');
+    if(u == std::string::npos)
+        return false;
+    size_t fieldStart = u + 1;
+    size_t fieldEnd = fieldStart;
+    while(fieldEnd < name.size() && name[fieldEnd] != '_')
+        fieldEnd++;
+
+    std::string field = name.substr(fieldStart, fieldEnd - fieldStart);
+    if(field.size() < 8)
+        return false;
+
+    int mm, dd, hh, mi;
+    if(sscanf(field.c_str(), "%2d%2d%2d%2d", &mm, &dd, &hh, &mi) != 4)
+        return false;
+
+    if(mm < 1 || mm > 12 || dd < 1 || dd > 31 || hh > 23 || mi > 59)
+        return false;
+
+    *year = 0; // caller overwrites
+    *month = mm;
+    *day = dd;
+    *hour = hh;
+    *minute = mi;
+    return true;
+}
+
 // Sync the ESP32 system clock (and the M5 RTC) from the camera's timecode.
 //
-// The camera's timecode is the only reliable clock we get over CCU. It gives a
-// time-of-day (HH:MM:SS) but no date, so we map it onto *today's* date as held
-// by the M5's own RTC (which keeps running). The result is a real, current UNIX
-// timestamp, which is what the GCSV "timestamp" field needs (Gyroflow previously
-// showed "26 years ago" when we wrote a seconds-since-midnight value).
+// The camera's timecode gives a reliable time-of-day (HH:MM:SS) but no date. We
+// map it onto the date we are told to use (the clip's date, or a default year
+// when the date is not yet known). The result is a real UNIX timestamp, which is
+// what the GCSV "timestamp" field needs (Gyroflow showed "26 years ago" when we
+// wrote a seconds-since-midnight value).
 //
 // We set both the M5 RTC and the ESP32 system time so that time() (used to build
-// the GCSV timestamp) reflects the camera's clock. Returns true on success.
-bool GyroLogWriter::syncRtcFromTimecode(const std::string& timecode)
+// the GCSV timestamp) and the FAT file timestamps reflect the value we set.
+// Returns true on success.
+bool GyroLogWriter::syncRtcFromTimecode(const std::string& timecode, int year)
 {
     int h, m, s, f;
     std::string norm = timecode;
@@ -98,14 +146,15 @@ bool GyroLogWriter::syncRtcFromTimecode(const std::string& timecode)
     if(h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
         return false;
 
-    // Today's date from the M5 RTC (it keeps running on the coin-cell-backed
-    // RTC8563). If the RTC is unavailable we fall back to the current system
-    // date, which is still better than nothing.
+    // Base date: the M5 RTC (it keeps running on the coin-cell-backed RTC8563).
+    // We only borrow its month/day as a fallback; the year is the one we were
+    // told to use, and the time-of-day comes from the camera's timecode.
     time_t now = time(nullptr);
     struct tm tmv;
     localtime_r(&now, &tmv);
 
-    // Overlay the camera's time-of-day onto today's date.
+    // Overlay the camera's time-of-day and the requested year.
+    tmv.tm_year = year - 1900;
     tmv.tm_hour = h;
     tmv.tm_min = m;
     tmv.tm_sec = s;
@@ -206,12 +255,39 @@ void GyroLogWriter::setOrientationIndex(int index)
 
 bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* ay, float* az)
 {
-    // M5.Imu returns gyro in rad/s and accel in g (see M5Unified IMU_Class).
-    if(!M5.Imu.isEnabled())
+    // Read the MPU6886 directly over the internal I2C bus. A single 14-byte
+    // burst from register 0x3B (ACCEL_XOUT_H) through 0x48 (GYRO_ZOUT_L)
+    // returns accel (6 bytes), temperature (2 bytes, skipped), and gyro
+    // (6 bytes). This is far cheaper than M5Unified's getGyro()+getAccel()
+    // pair, which each does a 15-byte read and is throttled to ~10 Hz by a
+    // 256 us gate. Reading directly lets us keep up with the sensor's true
+    // 1 kHz ODR.
+    //
+    // The MPU6886 is configured by M5Unified (begin()) to:
+    //   GYRO_CONFIG = 0x18  -> +/-2000 dps  -> 2000/32768 dps per LSB
+    //   ACCEL_CONFIG = 0x10 -> +/-8 g       -> 8/32768 g per LSB
+    //   SMPLRT_DIV = 0x03, CONFIG = 0x01 -> 1 kHz ODR, 44 Hz DLPF
+    // so the raw 16-bit values scale exactly as kGscale/kAscale below.
+    uint8_t buf[14];
+    if(!M5.In_I2C.readRegister(kImuAddr, 0x3B, buf, 14, 400000))
         return false;
-    bool okG = M5.Imu.getGyro(gx, gy, gz);
-    bool okA = M5.Imu.getAccel(ax, ay, az);
-    return okG && okA;
+
+    // accel: buf[0..5]  (XH,XL,YH,YL,ZH,ZL)
+    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
+    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
+    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
+    // gyro:  buf[8..13] (temp is buf[6..7])
+    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
+    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
+    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
+
+    *ax = rawAx * kAscale;
+    *ay = rawAy * kAscale;
+    *az = rawAz * kAscale;
+    *gx = rawGx * kGscale;
+    *gy = rawGy * kGscale;
+    *gz = rawGz * kGscale;
+    return true;
 }
 
 bool GyroLogWriter::ensureSd()
@@ -287,19 +363,21 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
     char path[128];
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
+    _gcsvPath = path;
     _file = SD.open(path, FILE_WRITE);
     if(!_file)
         return false;
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
-    // this). We sync the ESP32 clock from the camera's timecode (mapped onto
-    // today's date) so the value is a real, current epoch rather than a
-    // seconds-since-midnight number (which Gyroflow would read as 1970, i.e.
-    // "26 years ago"). The raw timecode is also recorded in "note".
+    // this). We sync the ESP32 clock from the camera's timecode. The clip's real
+    // date is not known yet (it only arrives after the clip, via the file name),
+    // so we use a default year (2026) for now; applySlateName() corrects this to
+    // the real date once the name is known.
     long timestampEpoch = 0;
-    if(syncRtcFromTimecode(timecode))
+    if(syncRtcFromTimecode(timecode, kDefaultYear))
         timestampEpoch = (long)time(nullptr);
+    _timestampEpoch = timestampEpoch;
     // The GCSV "lens_info" field is free-form extra lens/FOV metadata. We use
     // it to record the lens the camera reports (cat=12 param=9, e.g.
     // "Canon EF-S 18-55mm f/3.5-5.6 IS II"). Only written when known.
@@ -346,7 +424,8 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     }
 
     _tMs = 0;
-    _lastSampleMicros = micros();
+    _startMicros = micros();
+    _lastSampleMicros = _startMicros;
 
     _state = State::Recording;
     return true;
@@ -375,10 +454,13 @@ void GyroLogWriter::poll()
     long iay = lroundf(ay / kAscale);
     long iaz = lroundf(az / kAscale);
 
+    // t is the real elapsed time in ms since the log started (micros-based),
+    // so it stays correct even if a sample is ever dropped.
+    _tMs = (uint32_t)((now - _startMicros) / 1000);
+
     char row[64];
     int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
         (unsigned long)_tMs, igx, igy, igz, iax, iay, iaz);
-    _tMs += 1;
 
     // Append to the ring buffer if there is room; otherwise drop (we never
     // block the 1 kHz cadence on a full buffer).
@@ -462,6 +544,72 @@ bool GyroLogWriter::rewriteVideoFileName(const std::string& path, const std::str
     return true;
 }
 
+// Rewrite the "timestamp" header line of a closed .gcsv file at `path` to the
+// given UNIX epoch. Same read-modify-write approach as rewriteVideoFileName().
+bool GyroLogWriter::rewriteTimestamp(const std::string& path, long epoch)
+{
+    File f = SD.open(path.c_str(), FILE_READ);
+    if(!f)
+        return false;
+
+    size_t size = f.size();
+    std::string content;
+    content.reserve(size + 64);
+    int c;
+    while((c = f.read()) != -1)
+        content += (char)c;
+    f.close();
+
+    const char* kKey = "timestamp,";
+    size_t keyPos = content.find(kKey);
+    if(keyPos == std::string::npos)
+        return false;
+    size_t lineEnd = content.find('\n', keyPos);
+    if(lineEnd == std::string::npos)
+        lineEnd = content.size();
+
+    char val[24];
+    int vn = snprintf(val, sizeof(val), "%ld", epoch);
+
+    std::string out;
+    out.reserve(content.size() + 64);
+    out.append(content, 0, keyPos + strlen(kKey));
+    out.append(val, vn);
+    if(lineEnd < content.size())
+        out.append(content, lineEnd, content.size() - lineEnd);
+
+    File w = SD.open(path.c_str(), FILE_WRITE);
+    if(!w)
+        return false;
+    w.write((const uint8_t*)out.data(), out.size());
+    w.close();
+    return true;
+}
+
+// Set the FAT modification time of the file at `path` to `epoch` (UNIX
+// seconds) using FatFs's f_utime(). The SD card is mounted at "/sd" (see
+// SD.h), so the FatFs path is "/sd" + the path we open the file with. The
+// caller sets the system clock to the clip's date first, so the timestamp we
+// pass matches it. syncVolume() then commits the directory entry to the card.
+bool GyroLogWriter::setFileMtime(const std::string& path, long epoch)
+{
+    char fatfsPath[160];
+    snprintf(fatfsPath, sizeof(fatfsPath), "/sd%s", path.c_str());
+
+    // Convert the UNIX epoch to the packed FAT date/time words.
+    time_t t = (time_t)epoch;
+    struct tm tmv;
+    localtime_r(&t, &tmv);
+    uint16_t fdate = (uint16_t)(((tmv.tm_year + 1980) << 9) | ((tmv.tm_mon + 1) << 5) | tmv.tm_mday);
+    uint16_t ftime = (uint16_t)((tmv.tm_hour << 11) | (tmv.tm_min << 5) | (tmv.tm_sec / 2));
+
+    FILINFO fi;
+    memset(&fi, 0, sizeof(fi));
+    fi.fdate = fdate;
+    fi.ftime = ftime;
+    return f_utime(fatfsPath, &fi) == FR_OK;
+}
+
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
 {
     // Only meaningful right after a log has been finalised.
@@ -499,7 +647,40 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
         DEBUG_INFO("[GYRO-RENAME] updated videofilename to '%s'", newVideoFileName.c_str());
     else
         DEBUG_INFO("[GYRO-RENAME] could not update videofilename in '%s'", newPath);
-    // The rewrite dirties the directory again; commit it to the card.
+
+    // Now that we know the real clip name, correct the date. The name carries
+    // MMDDHHMM (e.g. 08260603 = Aug 26, 06:03) but no year, so we use the
+    // default year. We re-sync the clock to that date, rewrite the GCSV
+    // "timestamp" field, and touch the file so its FAT modification time matches.
+    int year, month, day, hour, minute;
+    if(parseClipNameDate(name, &year, &month, &day, &hour, &minute))
+    {
+        year = kDefaultYear;
+        struct tm tmv;
+        tmv.tm_year = year - 1900;
+        tmv.tm_mon = month - 1;
+        tmv.tm_mday = day;
+        tmv.tm_hour = hour;
+        tmv.tm_min = minute;
+        tmv.tm_sec = 0;
+        tmv.tm_isdst = -1;
+        long correctedEpoch = (long)mktime(&tmv);
+
+        // Set the system clock + M5 RTC to the clip's date (so the touch below
+        // stamps the right time) and record the corrected epoch.
+        char tc[16];
+        snprintf(tc, sizeof(tc), "%02d:%02d:%02d:00", hour, minute, 0);
+        syncRtcFromTimecode(tc, year);
+        _timestampEpoch = correctedEpoch;
+
+        if(rewriteTimestamp(newPath, correctedEpoch))
+            DEBUG_INFO("[GYRO-RENAME] corrected timestamp to %ld (%04d-%02d-%02d %02d:%02d)",
+              correctedEpoch, year, month, day, hour, minute);
+        if(setFileMtime(newPath, correctedEpoch))
+            DEBUG_INFO("[GYRO-RENAME] set file mtime to %ld", correctedEpoch);
+    }
+
+    // The rewrite/touch dirty the directory again; commit it to the card.
     syncVolume();
 
     // Reflect the new names in the summary shown on the Gyro Log screen.

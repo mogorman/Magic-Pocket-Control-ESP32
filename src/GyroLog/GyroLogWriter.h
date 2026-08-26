@@ -62,10 +62,10 @@ public:
 
     // Sync the ESP32 system clock (and the M5 RTC) from the camera's
     // timecode. The timecode gives a reliable time-of-day (HH:MM:SS); we map
-    // it onto today's date (from the M5's own RTC) so the resulting UNIX
-    // timestamp is a real, current value. Returns true if the clock was set.
-    // Call this before writing the GCSV "timestamp" field.
-    bool syncRtcFromTimecode(const std::string& timecode);
+    // it onto the date we are told to use (the clip's date, or a default year
+    // when that is not yet known) so the resulting UNIX timestamp is a real,
+    // current value. Returns true if the clock was set.
+    bool syncRtcFromTimecode(const std::string& timecode, int year);
 
     // Poll the IMU and append a sample if ~1 ms has elapsed since the last
     // sample. Call this every loop() iteration while recording.
@@ -116,6 +116,12 @@ public:
 
     // ---- IMU access (used by the calibration screen) ----
     // Read the current gyro (rad/s) and accel (g). Returns true on success.
+    //
+    // This reads the MPU6886 *directly* over I2C (a single 14-byte burst of the
+    // accel+gyro data registers) rather than going through M5Unified's
+    // getGyro()/getAccel(), which throttle re-reads to ~10 Hz (a 256 us gate
+    // around a 15-byte read). Reading directly lets us sample at the sensor's
+    // true 1 kHz ODR.
     bool readImu(float* gx, float* gy, float* gz, float* ax, float* ay, float* az);
 
 private:
@@ -137,9 +143,18 @@ private:
     // header at begin(); empty if the camera didn't report one.
     std::string _lensInfo;
 
-    // Timing: t is the elapsed ms since the clip started.
+    // The GCSV "timestamp" (UNIX epoch) we wrote in the header at begin(), and
+    // the .gcsv file path we started with. Both are remembered so that, once the
+    // real clip name (and therefore the real date) is known, we can correct the
+    // header timestamp and the file's FAT modification time.
+    long _timestampEpoch = 0;
+    std::string _gcsvPath;
+
+    // Timing: t is the elapsed ms since the clip started (real, micros-based so
+    // it stays accurate even if a sample is dropped).
     uint32_t _tMs = 0;
     uint32_t _lastSampleMicros = 0;
+    uint32_t _startMicros = 0; // micros() at the moment the log started
 
     // The PSRAM ring buffer that decouples the 1 kHz IMU read from the slower
     // SD write. Rows are appended here and drained to the file in chunks.
@@ -151,6 +166,9 @@ private:
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
+
+    // MPU6886 I2C address (7-bit). The M5 Core2's internal IMU sits at 0x68.
+    static const uint8_t kImuAddr = 0x68;
 
     // SD card status (for the on-screen diagnostic).
     bool _sdReady = false;
@@ -181,6 +199,14 @@ private:
     // Rewrite the "videofilename" header line of a closed .gcsv file at `path`
     // to `newVideoFileName`. Returns true on success.
     bool rewriteVideoFileName(const std::string& path, const std::string& newVideoFileName);
+
+    // Rewrite the "timestamp" header line of a closed .gcsv file at `path` to
+    // `epoch` (UNIX seconds). Returns true on success.
+    bool rewriteTimestamp(const std::string& path, long epoch);
+
+    // Set the FAT modification time of the file at `path` to `epoch` (UNIX
+    // seconds). Returns true on success.
+    bool setFileMtime(const std::string& path, long epoch);
 
     // Persist / load the orientation index via NVS.
     void saveOrientation();

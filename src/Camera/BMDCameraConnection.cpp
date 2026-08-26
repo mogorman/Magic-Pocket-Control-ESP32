@@ -387,11 +387,21 @@ static void DumpRejectedPacketHex(const uint8_t* pData, size_t length)
     DEBUG_INFO("%s", line);
 }
 
+// 1 = dump every incoming CCU packet (text + hex) for debugging. 0 = quiet.
+// Kept as a compile-time switch so the per-packet string building (which runs
+// in the BLE notify handler, right when the gyro log is sampling the IMU at
+// 1 kHz) can be switched off without touching the decode path.
+#ifndef GYROLOG_DEBUG
+    #define GYROLOG_DEBUG 0
+#endif
+
 // Incoming Control Notifications
 void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
-    // [DEBUG] Dump every incoming packet (always on for now).
-    DumpIncomingCCUPacket(pData, length);
+    // [DEBUG] Dump every incoming packet. Only when GYROLOG_DEBUG is on.
+    #if GYROLOG_DEBUG
+        DumpIncomingCCUPacket(pData, length);
+    #endif
 
     // Must be between 8 and 64 bytes inclusive
     if(length >= 8 && length <= 64)
@@ -405,7 +415,9 @@ void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *p
     else
     {
         // [DEBUG] Show the bytes of any packet we are about to drop.
-        DumpRejectedPacketHex(pData, length);
+        #if GYROLOG_DEBUG
+            DumpRejectedPacketHex(pData, length);
+        #endif
         DEBUG_ERROR("Invalid incoming packet length.");
     }
 }

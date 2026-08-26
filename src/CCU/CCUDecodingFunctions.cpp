@@ -914,14 +914,22 @@ void CCUDecodingFunctions::DecodeProjectName(std::vector<byte> inData)
 }
 
 
+// 1 = keep the slate-decode debug prints. 0 = quiet (avoids building strings
+// on every slate packet, which the camera sends repeatedly while in playback).
+#ifndef GYROLOG_DEBUG
+    #define GYROLOG_DEBUG 0
+#endif
+
 void CCUDecodingFunctions::DecodeSlateForType(std::vector<byte> inData)
 {
     std::vector<sbyte> data = CCUDecodingFunctions::ConvertPayloadDataWithExpectedCount<sbyte>(inData, 1);
     CCUPacketTypes::MetadataSlateForType slateForType = static_cast<CCUPacketTypes::MetadataSlateForType>(data[0]);
 
     // [DEBUG] Slate type: 0 = NextClip (placeholder), 1 = PlaybackFile
-    DEBUG_INFO("[SLATE] type=%d (%s)", (int)slateForType,
-      slateForType == CCUPacketTypes::MetadataSlateForType::NextClip ? "NextClip" : "PlaybackFile");
+    #if GYROLOG_DEBUG
+        DEBUG_INFO("[SLATE] type=%d (%s)", (int)slateForType,
+          slateForType == CCUPacketTypes::MetadataSlateForType::NextClip ? "NextClip" : "PlaybackFile");
+    #endif
 
     BMDControlSystem::getInstance()->getCamera()->onSlateTypeReceived(slateForType);
 }
@@ -931,7 +939,9 @@ void CCUDecodingFunctions::DecodeSlateForName(std::vector<byte> inData)
     // [DEBUG] Raw slate payload exactly as received (before any path stripping),
     // so a real clip filename (e.g. "A011_01011355_C001.braw") is unmistakable.
     std::string raw = CCUDecodingFunctions::ConvertPayloadDataToString(inData);
-    DEBUG_INFO("[SLATE] raw='%s' (rawlen=%d)", raw.c_str(), (int)raw.size());
+    #if GYROLOG_DEBUG
+        DEBUG_INFO("[SLATE] raw='%s' (rawlen=%d)", raw.c_str(), (int)raw.size());
+    #endif
 
     std::string name = raw;
 
@@ -945,7 +955,9 @@ void CCUDecodingFunctions::DecodeSlateForName(std::vector<byte> inData)
     }
 
     // [DEBUG] Slate name after any /mnt/sN/ strip.
-    DEBUG_INFO("[SLATE] name='%s' (len=%d)", name.c_str(), (int)name.size());
+    #if GYROLOG_DEBUG
+        DEBUG_INFO("[SLATE] name='%s' (len=%d)", name.c_str(), (int)name.size());
+    #endif
 
     BMDControlSystem::getInstance()->getCamera()->onSlateNameReceived(name);
 }
