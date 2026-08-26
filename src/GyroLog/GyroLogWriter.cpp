@@ -636,14 +636,28 @@ void GyroLogWriter::drainRing()
     // keeps the C stdio / SD path from ever touching memory the sampler is
     // mutating, which is what was corrupting the internal heap.
     //
-    // The local buffer is a task-local (stack) allocation of the max ring size.
-    // 64 KB on the writer task's stack is too big, so we use a heap buffer for
-    // the snapshot and free it after the write.
+    // The snapshot buffer. 64 KB is too big for the writer task's stack, so it
+    // lives in the heap. We allocate it in PSRAM (the Core2 has 4 MB, plenty
+    // free) rather than internal DRAM: a 64 KB MALLOC_CAP_INTERNAL allocation
+    // fails on the Core2 (internal DRAM is too tight), which silently made every
+    // drain return early and left the ring pinned full. fwrite() reads the bytes
+    // from whatever pointer we hand it, so a PSRAM source buffer is fine.
     static uint8_t* s_drainBuf = nullptr;
     if(!s_drainBuf)
-        s_drainBuf = (uint8_t*)heap_caps_malloc(kRingSize, MALLOC_CAP_INTERNAL);
+        s_drainBuf = (uint8_t*)ps_malloc(kRingSize);
     if(!s_drainBuf)
+    {
+        // [DIAG] If we ever can't get the snapshot buffer, say so once so it is
+        // not mistaken for a logic bug.
+        static bool warned = false;
+        if(!warned)
+        {
+            warned = true;
+            DEBUG_ERROR("[GYRO-DIAG] drainRing: ps_malloc(%lu) for snapshot FAILED (free internal=%lu, psram=%lu)",
+                (unsigned long)kRingSize, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+        }
         return; // can't snapshot; drop this drain (the ring will fill and drop)
+    }
 
     size_t total = 0;
     xSemaphoreTake(_ringMutex, portMAX_DELAY);
