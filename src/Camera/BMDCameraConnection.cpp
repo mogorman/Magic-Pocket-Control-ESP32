@@ -366,6 +366,14 @@ static void DumpIncomingCCUPacket(const uint8_t* pData, size_t length)
 
     DEBUG_INFO("[BLE] len=%d cat=%d param=%d payload='%s'",
         (int)length, (int)category, (int)parameter, text.c_str());
+
+    // [DEBUG] Also dump the full packet as hex so binary payloads (e.g. a
+    // slate-name reply) can be read exactly.
+    char hex[160];
+    int n = snprintf(hex, sizeof(hex), "[BLE-HEX] len=%d: ", (int)length);
+    for(size_t i = 0; i < length && n < (int)sizeof(hex) - 4; i++)
+        n += snprintf(hex + n, sizeof(hex) - n, "%02X ", pData[i]);
+    DEBUG_INFO("%s", hex);
 }
 
 // [DEBUG] Hex dump of a packet we are about to reject (e.g. >64 bytes), so we
