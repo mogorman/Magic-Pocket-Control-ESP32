@@ -660,7 +660,19 @@ void GyroLogWriter::drainRing()
         _ringRead = (_ringRead + total) % kRingSize;
         _ringCount = 0;
     }
+    size_t countAfter = _ringCount;
     xSemaphoreGive(_ringMutex);
+
+    // [DIAG] Log what this drain actually removed. If total is large but the
+    // ring stays full, the zero isn't sticking (a race) or the sampler is
+    // refilling instantly.
+    static uint32_t lastDrainLog = 0;
+    if(xTaskGetTickCount() - lastDrainLog >= 1000)
+    {
+        lastDrainLog = xTaskGetTickCount();
+        DEBUG_INFO("[GYRO-DIAG] drainRing: total=%lu countAfter=%lu ringRead=%lu ringWrite=%lu",
+            (unsigned long)total, (unsigned long)countAfter, (unsigned long)_ringRead, (unsigned long)_ringWrite);
+    }
 
     if(total == 0)
         return;
