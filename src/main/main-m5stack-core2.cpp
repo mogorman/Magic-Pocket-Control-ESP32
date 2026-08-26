@@ -152,6 +152,12 @@ Screens connectedScreenIndex = Screens::NoConnection; // The index of the screen
 // Keep track of the last camera modified time that we refreshed a screen so we don't keep refreshing a screen when the camera object remains unchanged.
 static unsigned long lastRefreshedScreen = 0;
 
+// [DEBUG] One-shot slate-name query, fired from the main loop (safe context) a
+// couple of seconds after a clip starts, to ask the camera for the real clip
+// filename. Set by the recording-state callback, consumed by loop().
+static bool slateQueryArmed = false;
+static unsigned long slateQueryTime = 0;
+
 // Button pressed indications for use in each individual page
 bool btnAPressed = false;
 bool btnBPressed = false;
@@ -4087,12 +4093,19 @@ void loop() {
           (int)slateIsPlaceholder,
           cam->getTimecodeString().c_str());
 
+        // [DEBUG] Arm a one-shot slate-name query to run from the main loop a
+        // couple of seconds after the clip starts (when the real clip filename
+        // should exist). We must NOT send the query from this callback (the BLE
+        // notify handler) - the blocking RSP write deadlocks there. Instead we
+        // set a flag and let loop() do the send.
         if(recording)
         {
-          // (gyroLog.begin(...) disabled)
+          slateQueryArmed = true;
+          slateQueryTime = millis() + 2000;
         }
         else
         {
+          slateQueryArmed = false;
           // (gyroLog.end() / applySlateName(...) disabled)
           // Bring the display back on and force a refresh of the screen.
           tft.setBrightness(127);
@@ -4334,6 +4347,17 @@ void loop() {
     DEBUG_INFO("[PING] sending AutoFocus request to camera");
     PacketWriter::writeAutoFocus(&cameraConnection);
     DEBUG_INFO("[PING] AutoFocus request returned (no crash)");
+  }
+
+  // [DEBUG] Fire the one-shot slate-name query from the main loop (safe
+  // context) once the armed time has passed. The camera should now be
+  // recording and should reply with the real clip filename.
+  if(slateQueryArmed &&
+     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected &&
+     currentTime >= slateQueryTime)
+  {
+    slateQueryArmed = false;
+    PacketWriter::writeSlateNameQuery(&cameraConnection);
   }
 
   delay(5);
