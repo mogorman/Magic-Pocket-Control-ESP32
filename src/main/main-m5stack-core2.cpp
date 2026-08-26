@@ -179,6 +179,39 @@ static unsigned long lastRefreshedScreen = 0;
 // handler, where a blocking write would deadlock).
 static bool gyroInPlayback = false;
 
+// Set by the record-stop callback to ask the main loop to finalise the GCSV
+// log. The log must NOT be closed from the callback itself: end() does a
+// blocking SD unmount/remount (syncVolume), and the main loop is concurrently
+// writing samples to the same SD card at 1 kHz. Running the teardown on the
+// BLE notify thread while the main loop is mid-write corrupts the heap (TLSF
+// "free list cannot have a null entry" assert). Deferring end() to the main
+// loop keeps it on the same thread as the sampling, so there is no race.
+static bool gyroPendingEnd = false;
+
+// The real clip name (and its extension) received from the camera during
+// playback, queued for the main loop to apply. applySlateName() renames the
+// GCSV and rewrites its fields, which all do SD work (rename + two
+// unmount/remount syncs) and so must not run on the BLE notify thread while
+// the main loop is writing to the same card. The slate callback only records
+// the name here; the main loop calls gyroLog.applySlateName() once.
+static std::string gyroPendingSlateName;
+static std::string gyroPendingSlateNameExt;
+static bool gyroPendingSlateNameValid = false;
+
+// A queued "start a new GCSV log" request, set by the record-start callback
+// and applied by the main loop. begin() opens a file on the SD card, so it
+// must not run on the BLE notify thread while the main loop may be touching
+// the same card. The main loop (same thread as poll()) calls begin() once.
+struct GyroPendingStart
+{
+  std::string clipName;
+  std::string ext;
+  std::string timecode;
+  std::string lensInfo;
+  bool valid = false;
+};
+static GyroPendingStart gyroPendingStart;
+
 // The codec in effect when the clip started, so we can build the correct file
 // extension for the video file name once we have the base name.
 static CCUPacketTypes::BasicCodec gyroStartCodec = CCUPacketTypes::BasicCodec::BRAW;
@@ -4078,10 +4111,46 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 void loop() {
 
+  // Start a queued GCSV log here, on the main loop thread. The record-start
+  // callback (BLE notify thread) only set gyroPendingStart; begin() opens a
+  // file on the SD card and must not run on that thread while the main loop
+  // may be touching the same card. Only applied when not already recording.
+  if(gyroPendingStart.valid && !gyroLog.isRecording())
+  {
+    gyroPendingStart.valid = false;
+    if(gyroLog.begin(gyroPendingStart.clipName, gyroPendingStart.ext,
+                     gyroPendingStart.timecode, gyroPendingStart.lensInfo))
+      DEBUG_INFO("[GYRO] started log '%s.%s' lens='%s'",
+        gyroPendingStart.clipName.c_str(), gyroPendingStart.ext.c_str(), gyroPendingStart.lensInfo.c_str());
+    else
+      DEBUG_ERROR("[GYRO] failed to start log (SD not ready?)");
+  }
+
   // Keep the gyro log sampling at ~1 kHz while a clip is being recorded. This
   // runs regardless of the 5 ms UI delay below so the sample cadence stays
   // tight. (No-op when not recording.)
   gyroLog.poll();
+
+  // Finalise a just-stopped GCSV log here, on the main loop thread. The record
+  // stop callback (BLE notify thread) only set gyroPendingEnd; doing the
+  // blocking SD unmount/remount from that thread while poll() above is writing
+  // to the same card corrupts the heap. end() is a no-op if no log is active.
+  if(gyroPendingEnd)
+  {
+    gyroPendingEnd = false;
+    if(gyroLog.end())
+      DEBUG_INFO("[GYRO] ended log, duration %lu ms", (unsigned long)gyroLog.getSummary().durationMs);
+  }
+
+  // Apply a queued clip-name rename here, on the main loop thread, once the
+  // log has been closed (end() above). Renaming/rewriting the GCSV does SD
+  // work that must not run on the BLE notify thread while the main loop is
+  // writing to the same card. Only runs when not actively recording.
+  if(gyroPendingSlateNameValid && !gyroLog.isRecording())
+  {
+    gyroPendingSlateNameValid = false;
+    gyroLog.applySlateName(gyroPendingSlateName, gyroPendingSlateNameExt);
+  }
 
   static unsigned long lastConnectedTime = 0;
   const unsigned long reconnectInterval = 5000;  // 5 seconds (milliseconds)
@@ -4147,19 +4216,20 @@ void loop() {
           if(cam->hasCodec())
             gyroStartCodec = cam->getCodec().basicCodec;
 
-          // Start the GCSV log with a generic name. We will rename it to the
-          // real clip name once the camera tells us (via playback) after the
-          // clip stops.
-          std::string clipName = nextGyroClipName();
-          std::string ext = gyroVideoExtension(cam.get());
+          // Queue a new GCSV log for the main loop to start. We do NOT call
+          // begin() here: it opens a file on the SD card and must not run on
+          // this BLE notify thread while the main loop may be touching the same
+          // card. The main loop (same thread as poll()) calls begin() next.
+          // We will rename the log to the real clip name once the camera tells
+          // us (via playback) after the clip stops.
+          gyroPendingStart.clipName = nextGyroClipName();
+          gyroPendingStart.ext = gyroVideoExtension(cam.get());
           // The lens the camera reports (cat=12 param=9), e.g.
           // "Canon EF-S 18-55mm f/3.5-5.6 IS II". Recorded in the GCSV
           // "lens_info" field. May be empty if the camera hasn't sent one yet.
-          std::string lensInfo = cam->hasLensType() ? cam->getLensType() : "";
-          if(gyroLog.begin(clipName, ext, cam->getTimecodeString(), lensInfo))
-            DEBUG_INFO("[GYRO] started log '%s.%s' lens='%s'", clipName.c_str(), ext.c_str(), lensInfo.c_str());
-          else
-            DEBUG_ERROR("[GYRO] failed to start log (SD not ready?)");
+          gyroPendingStart.lensInfo = cam->hasLensType() ? cam->getLensType() : "";
+          gyroPendingStart.timecode = cam->getTimecodeString();
+          gyroPendingStart.valid = true;
 
           // Turn the display off while recording (as before).
           tft.setBrightness(0);
@@ -4167,10 +4237,13 @@ void loop() {
         else
         {
           // ---- RECORD STOP ----
-          // Finalise the GCSV log now (data is complete).
+          // Record the end timecode now, but defer the actual log teardown to
+          // the main loop (gyroPendingEnd). end() does a blocking SD
+          // unmount/remount and must not run on this BLE notify thread while
+          // the main loop is writing samples to the same card (see the
+          // gyroPendingEnd note above).
           gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
-          if(gyroLog.end())
-            DEBUG_INFO("[GYRO] ended log, duration %lu ms", (unsigned long)gyroLog.getSummary().durationMs);
+          gyroPendingEnd = true;
 
           // Flip the camera into playback (from the main loop) so it reports
           // the real clip name. Mark that we're in the playback-reading phase.
@@ -4200,7 +4273,10 @@ void loop() {
 
         DEBUG_INFO("[GYRO] got clip name from playback: '%s'", name.c_str());
 
-        // Rename the finalised GCSV to match the real video file name.
+        // Queue the real clip name for the main loop to apply. We do NOT call
+        // applySlateName() here: it renames the GCSV and rewrites fields, all
+        // of which do SD work (rename + unmount/remount syncs) and must not run
+        // on this BLE notify thread while the main loop writes to the same card.
         std::string ext = "braw";
         switch(gyroStartCodec)
         {
@@ -4210,7 +4286,9 @@ void loop() {
           case CCUPacketTypes::BasicCodec::BRAW:   ext = "braw"; break;
           default: ext = "braw"; break;
         }
-        gyroLog.applySlateName(name, ext);
+        gyroPendingSlateName = name;
+        gyroPendingSlateNameExt = ext;
+        gyroPendingSlateNameValid = true;
 
         // We have the name; tell the main loop to flip back to record.
         gyroInPlayback = false;
