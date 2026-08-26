@@ -371,11 +371,13 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     // Open the GCSV file with SdFat. SdFat paths are relative to the volume
     // root, so "/<name>.gcsv" is correct (no "/sd" VFS prefix). O_CREAT|O_TRUNC
     // creates/truncates the file.
+    uint32_t tOpen = micros();
     if(!_file.open(_gcsvPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC))
     {
         DEBUG_INFO("[GYRO-DIAG] begin(): FatFile::open FAILED for '%s' (err=%d)", _gcsvPath.c_str(), (int)_file.getError());
         return false;
     }
+    DEBUG_INFO("[GYRO-DIAG] begin(): open() took %lu us", (unsigned long)(micros() - tOpen));
 
     // Pre-allocate the file up front so the SD card never has to search for
     // free clusters mid-write (the high-speed-logging pattern). Any unused
@@ -389,8 +391,10 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     // preAllocate() needs that much *contiguous* free space; on a nearly-full
     // card it can fail. That's not fatal -- we just log it and record without
     // pre-allocation (the file still grows normally, allocating as it goes).
+    uint32_t tPre = micros();
     if(!_file.preAllocate(160UL * 1024 * 1024))
         DEBUG_INFO("[GYRO] begin(): preAllocate(160 MB) failed (card too full/fragmented?) -- recording without pre-allocation");
+    DEBUG_INFO("[GYRO-DIAG] begin(): preAllocate(160 MB) took %lu us", (unsigned long)(micros() - tPre));
 
     // Wire the ring buffer to the file. The sampler writes rows into the ring;
     // drainRing() calls ring.writeOut() to commit them to the file.
@@ -769,8 +773,12 @@ bool GyroLogWriter::end()
     if(_file.isOpen())
     {
         _finalFileSizeBytes = _file.fileSize();
+        uint32_t tClose = micros();
         closeFile(); // truncate() + sync() + close()
+        DEBUG_INFO("[GYRO-DIAG] end(): closeFile() (truncate+sync+close) took %lu us", (unsigned long)(micros() - tClose));
+        uint32_t tSync = micros();
         syncVolume();
+        DEBUG_INFO("[GYRO-DIAG] end(): syncVolume() (unmount+remount) took %lu us", (unsigned long)(micros() - tSync));
     }
 
     // Capture the summary.
