@@ -1,3 +1,11 @@
+// [DIAG] Isolation toggle. When set, the GCSV writer skips ALL SD card I/O
+// (open/write/close/sync) but still samples the MPU6886 at 1 kHz into the
+// in-RAM ring. If the clip-end heap corruption disappears with this on, the
+// SD/FatFs write path is the corruptor; if it persists, the IMU I2C read is.
+#ifndef GYROLOG_DIAG_NO_SD_WRITE
+#define GYROLOG_DIAG_NO_SD_WRITE 1 // [DIAG] 1 = skip all SD I/O (isolation test)
+#endif
+
 #include "GyroLogWriter.h"
 #include <SD.h>
 #include <M5Unified.h>
@@ -297,6 +305,13 @@ bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* a
 
 bool GyroLogWriter::ensureSd()
 {
+#if GYROLOG_DIAG_NO_SD_WRITE
+    // [DIAG] No SD I/O: pretend the card is ready so begin() proceeds and the
+    // 1 kHz sampling runs without any SD mount/write.
+    _sdReady = true;
+    _sdStatusMessage = "diag: no SD";
+    return true;
+#else
     // If the filesystem is already mounted, it's ready.
     if(SD.cardSize() > 0)
     {
@@ -327,6 +342,7 @@ bool GyroLogWriter::ensureSd()
     _sdReady = false;
     _sdStatusMessage = "no card detected";
     return false;
+#endif
 }
 
 // Force the FAT volume's cached directory entries (file sizes + cluster
@@ -379,9 +395,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     char path[128];
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
+#if !GYROLOG_DIAG_NO_SD_WRITE
     _file = SD.open(path, FILE_WRITE);
     if(!_file)
         return false;
+#endif
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
@@ -510,7 +528,19 @@ void GyroLogWriter::poll()
 
 void GyroLogWriter::drainRing()
 {
-    if(_ringCount == 0 || !_file)
+    if(_ringCount == 0)
+        return;
+
+#if GYROLOG_DIAG_NO_SD_WRITE
+    // [DIAG] No SD: just discard the buffered rows so the ring keeps turning.
+    // This lets us test whether the 1 kHz IMU sampling alone (no SD writes)
+    // corrupts the heap.
+    _ringRead = 0;
+    _ringWrite = 0;
+    _ringCount = 0;
+    return;
+#else
+    if(!_file)
         return;
 
     // Copy out the contiguous available bytes and write them.
@@ -525,6 +555,7 @@ void GyroLogWriter::drainRing()
     _ringRead = (_ringRead + total) % kRingSize;
     _ringCount = 0;
     _file.flush();
+#endif
 }
 
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
@@ -740,6 +771,7 @@ bool GyroLogWriter::end()
 
     // Flush any remaining buffered samples.
     drainRing();
+#if !GYROLOG_DIAG_NO_SD_WRITE
     _file.flush();
 
     // Capture the summary before closing.
@@ -756,6 +788,13 @@ bool GyroLogWriter::end()
     // Commit the file's directory entry (size + clusters) to the card so the
     // file is not read back as 0 bytes on a computer.
     syncVolume();
+#else
+    // [DIAG] No SD: no file to close/sync. Just record a minimal summary.
+    _summary.valid = true;
+    _summary.fileName = _startedName + ".gcsv";
+    _summary.videoFileName = _videoFileName;
+    _summary.durationMs = _tMs;
+#endif
 
     if(_ring)
     {
