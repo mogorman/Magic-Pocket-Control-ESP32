@@ -4314,7 +4314,9 @@ static void imuSdWriteTest()
   // SdFat only do beginTransaction/endTransaction on it.
   SPI.begin();
   SdFat sd;
-  if(!sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40))))
+  // 4 MHz SCK (matches the Arduino SD lib's working default). 40 MHz timed out
+  // on this shared VSPI bus.
+  if(!sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4))))
   {
     // Print the full SdFat error so we can see WHY the mount failed: the card
     // type (0 = not detected), the SD error code + data, and the volume fatType.

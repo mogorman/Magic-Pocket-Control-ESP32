@@ -300,7 +300,7 @@ bool GyroLogWriter::ensureSd()
     // bus corrupts the MISO path and the card read times out (0xFF). Bring the
     // Arduino SPI object up first, then let SdFat only do begin/endTransaction.
     SPI.begin();
-    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40))))
+    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4))))
     {
         _sdReady = false;
         _sdStatusMessage = "mount failed (no card / not FAT?)";
@@ -336,7 +336,7 @@ void GyroLogWriter::syncVolume()
 
     _sd.end();
     SPI.begin();
-    _sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40)));
+    _sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4)));
 }
 
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
