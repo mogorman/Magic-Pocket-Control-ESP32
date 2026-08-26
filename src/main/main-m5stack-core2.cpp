@@ -4124,8 +4124,12 @@ void loop() {
           // clip stops.
           std::string clipName = nextGyroClipName();
           std::string ext = gyroVideoExtension(cam.get());
-          if(gyroLog.begin(clipName, ext, cam->getTimecodeString()))
-            DEBUG_INFO("[GYRO] started log '%s.%s'", clipName.c_str(), ext.c_str());
+          // The lens the camera reports (cat=12 param=9), e.g.
+          // "Canon EF-S 18-55mm f/3.5-5.6 IS II". Recorded in the GCSV
+          // "lens_info" field. May be empty if the camera hasn't sent one yet.
+          std::string lensInfo = cam->hasLensType() ? cam->getLensType() : "";
+          if(gyroLog.begin(clipName, ext, cam->getTimecodeString(), lensInfo))
+            DEBUG_INFO("[GYRO] started log '%s.%s' lens='%s'", clipName.c_str(), ext.c_str(), lensInfo.c_str());
           else
             DEBUG_ERROR("[GYRO] failed to start log (SD not ready?)");
 

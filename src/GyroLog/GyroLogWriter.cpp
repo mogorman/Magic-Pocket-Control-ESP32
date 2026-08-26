@@ -264,7 +264,7 @@ void GyroLogWriter::syncVolume()
     SD.begin(4);
 }
 
-bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode)
+bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
 {
     if(_state == State::Recording)
         return false; // already recording
@@ -283,6 +283,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         _startedName = clipName; // shouldn't happen; caller handles the fallback
     _extension = extension;
     _videoFileName = _startedName + "." + extension;
+    _lensInfo = lensInfo;
 
     char path[128];
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
@@ -299,7 +300,10 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     long timestampEpoch = 0;
     if(syncRtcFromTimecode(timecode))
         timestampEpoch = (long)time(nullptr);
-    char header[600];
+    // The GCSV "lens_info" field is free-form extra lens/FOV metadata. We use
+    // it to record the lens the camera reports (cat=12 param=9, e.g.
+    // "Canon EF-S 18-55mm f/3.5-5.6 IS II"). Only written when known.
+    char header[700];
     int n = snprintf(header, sizeof(header),
         "GYROFLOW IMU LOG\n"
         "version,1.3\n"
@@ -309,15 +313,27 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         "fwversion,1.0.0\n"
         "timestamp,%ld\n"
         "vendor,m5stack\n"
-        "videofilename,%s\n"
+        "videofilename,%s\n",
+        GyroLogWriter::orientationToken(_orientationIndex),
+        timecode.c_str(),
+        timestampEpoch,
+        _videoFileName.c_str());
+    if(!_lensInfo.empty())
+    {
+        // The lens string is free text from the camera; strip any commas so it
+        // can't break the CSV field, then append it as its own line.
+        std::string lens = _lensInfo;
+        for(char& c : lens)
+            if(c == ',' || c == '\n' || c == '\r')
+                c = ' ';
+        n += snprintf(header + n, sizeof(header) - (size_t)n,
+            "lens_info,%s\n", lens.c_str());
+    }
+    n += snprintf(header + n, sizeof(header) - (size_t)n,
         "tscale,%s\n"
         "gscale,%.11f\n"
         "ascale,%.11f\n"
         "t,gx,gy,gz,ax,ay,az\n",
-        GyroLogWriter::orientationToken(_orientationIndex),
-        timecode.c_str(),
-        timestampEpoch,
-        _videoFileName.c_str(),
         kTscale,
         kGscale,
         kAscale);
@@ -399,6 +415,53 @@ void GyroLogWriter::drainRing()
     _file.flush();
 }
 
+// Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
+//
+// The file was written with a generic name (e.g. "clip_0001.mov") and later
+// renamed to the real clip name. The "videofilename" field inside the header
+// still holds the old name, so we read the whole file, replace that one line,
+// and write it back. The file is small (a few hundred KB at most) and this runs
+// once per clip, so a full read/rewrite is fine. Returns true on success.
+bool GyroLogWriter::rewriteVideoFileName(const std::string& path, const std::string& newVideoFileName)
+{
+    File f = SD.open(path.c_str(), FILE_READ);
+    if(!f)
+        return false;
+
+    size_t size = f.size();
+    std::string content;
+    content.reserve(size + 64);
+    int c;
+    while((c = f.read()) != -1)
+        content += (char)c;
+    f.close();
+
+    // Locate the "videofilename," line and replace everything up to its end of
+    // line with the new value.
+    const char* kKey = "videofilename,";
+    size_t keyPos = content.find(kKey);
+    if(keyPos == std::string::npos)
+        return false; // no such field; leave the file alone
+    size_t lineEnd = content.find('\n', keyPos);
+    if(lineEnd == std::string::npos)
+        lineEnd = content.size();
+
+    std::string out;
+    out.reserve(content.size() + 64);
+    out.append(content, 0, keyPos + strlen(kKey));
+    out += newVideoFileName;
+    if(lineEnd < content.size())
+        out.append(content, lineEnd, content.size() - lineEnd); // keep the trailing \n and the rest
+
+    // Write it back.
+    File w = SD.open(path.c_str(), FILE_WRITE);
+    if(!w)
+        return false;
+    w.write((const uint8_t*)out.data(), out.size());
+    w.close();
+    return true;
+}
+
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
 {
     // Only meaningful right after a log has been finalised.
@@ -420,8 +483,7 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
 
     // The file was already closed (and its directory entry committed to the
     // card) by end(). Move it to the real clip name with SD.rename() (a FatFs
-    // f_rename). We deliberately do not rewrite the "videofilename" header
-    // line here — just the rename.
+    // f_rename).
     if(std::strcmp(oldPath, newPath) != 0)
     {
         bool renamed = SD.rename(oldPath, newPath);
@@ -430,10 +492,20 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
         syncVolume();
     }
 
+    // Update the "videofilename" field inside the (now renamed) file so it
+    // matches the real video file name, not the generic name we started with.
+    std::string newVideoFileName = name + "." + extension;
+    if(rewriteVideoFileName(newPath, newVideoFileName))
+        DEBUG_INFO("[GYRO-RENAME] updated videofilename to '%s'", newVideoFileName.c_str());
+    else
+        DEBUG_INFO("[GYRO-RENAME] could not update videofilename in '%s'", newPath);
+    // The rewrite dirties the directory again; commit it to the card.
+    syncVolume();
+
     // Reflect the new names in the summary shown on the Gyro Log screen.
     _startedName = name;
     _extension = extension;
-    _videoFileName = name + "." + extension;
+    _videoFileName = newVideoFileName;
     _summary.fileName = name + ".gcsv";
     _summary.videoFileName = _videoFileName;
 }

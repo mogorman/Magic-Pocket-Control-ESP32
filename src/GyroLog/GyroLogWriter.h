@@ -56,7 +56,9 @@ public:
     //   clipName  : base name without extension (e.g. "A001C001_001" or "clip_0001")
     //   extension : the video extension (e.g. "braw", "mov")
     //   timecode  : the camera timecode at the moment recording started
-    bool begin(const std::string& clipName, const std::string& extension, const std::string& timecode);
+    //   lensInfo  : the lens the camera reports (e.g. "Canon EF-S 18-55mm ...");
+    //               recorded in the GCSV "lens_info" field. May be empty.
+    bool begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo = "");
 
     // Sync the ESP32 system clock (and the M5 RTC) from the camera's
     // timecode. The timecode gives a reliable time-of-day (HH:MM:SS); we map
@@ -131,6 +133,10 @@ private:
     // the file is finalised, when a real slate name becomes available.
     std::string _videoFileName;
 
+    // The lens the camera reports (GCSV "lens_info" field). Recorded in the
+    // header at begin(); empty if the camera didn't report one.
+    std::string _lensInfo;
+
     // Timing: t is the elapsed ms since the clip started.
     uint32_t _tMs = 0;
     uint32_t _lastSampleMicros = 0;
@@ -171,6 +177,10 @@ private:
     // card (unmount + remount). Call after closing a file so its size is not
     // read back as 0 bytes on a computer.
     void syncVolume();
+
+    // Rewrite the "videofilename" header line of a closed .gcsv file at `path`
+    // to `newVideoFileName`. Returns true on success.
+    bool rewriteVideoFileName(const std::string& path, const std::string& newVideoFileName);
 
     // Persist / load the orientation index via NVS.
     void saveOrientation();
