@@ -58,6 +58,13 @@ public:
     //   timecode  : the camera timecode at the moment recording started
     bool begin(const std::string& clipName, const std::string& extension, const std::string& timecode);
 
+    // Sync the ESP32 system clock (and the M5 RTC) from the camera's
+    // timecode. The timecode gives a reliable time-of-day (HH:MM:SS); we map
+    // it onto today's date (from the M5's own RTC) so the resulting UNIX
+    // timestamp is a real, current value. Returns true if the clock was set.
+    // Call this before writing the GCSV "timestamp" field.
+    bool syncRtcFromTimecode(const std::string& timecode);
+
     // Poll the IMU and append a sample if ~1 ms has elapsed since the last
     // sample. Call this every loop() iteration while recording.
     void poll();

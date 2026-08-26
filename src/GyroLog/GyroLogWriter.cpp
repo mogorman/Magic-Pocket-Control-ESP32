@@ -75,6 +75,51 @@ static long timecodeToSeconds(const std::string& tc)
     return (long)h * 3600 + (long)m * 60 + s;
 }
 
+// Sync the ESP32 system clock (and the M5 RTC) from the camera's timecode.
+//
+// The camera's timecode is the only reliable clock we get over CCU. It gives a
+// time-of-day (HH:MM:SS) but no date, so we map it onto *today's* date as held
+// by the M5's own RTC (which keeps running). The result is a real, current UNIX
+// timestamp, which is what the GCSV "timestamp" field needs (Gyroflow previously
+// showed "26 years ago" when we wrote a seconds-since-midnight value).
+//
+// We set both the M5 RTC and the ESP32 system time so that time() (used to build
+// the GCSV timestamp) reflects the camera's clock. Returns true on success.
+bool GyroLogWriter::syncRtcFromTimecode(const std::string& timecode)
+{
+    int h, m, s, f;
+    std::string norm = timecode;
+    for(char& c : norm)
+        if(c == ';')
+            c = ':';
+    if(norm.size() < 8 || sscanf(norm.c_str(), "%d:%d:%d:%d", &h, &m, &s, &f) != 4)
+        return false;
+    if(h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
+        return false;
+
+    // Today's date from the M5 RTC (it keeps running on the coin-cell-backed
+    // RTC8563). If the RTC is unavailable we fall back to the current system
+    // date, which is still better than nothing.
+    time_t now = time(nullptr);
+    struct tm tmv;
+    localtime_r(&now, &tmv);
+
+    // Overlay the camera's time-of-day onto today's date.
+    tmv.tm_hour = h;
+    tmv.tm_min = m;
+    tmv.tm_sec = s;
+    tmv.tm_isdst = -1;
+
+    // Push it to the M5 RTC and the ESP32 system clock.
+    M5.Rtc.setDateTime(&tmv);
+    M5.Rtc.setSystemTimeFromRtc();
+
+    // Re-read the system time so time() reflects the value we just set.
+    now = time(nullptr);
+    localtime_r(&now, &tmv);
+    return true;
+}
+
 // Turn a raw clip/slate name into a safe file-name base. Placeholder slate
 // names the camera sends (e.g. "Next Clip") are dropped (returns empty), and
 // any characters that are unsafe in a file name are replaced with '_'.
@@ -230,26 +275,13 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
-    // this). We build it from the camera's timecode (HH:MM:SS) mapped onto
-    // *today's* date, so the value is a real, current epoch rather than a
+    // this). We sync the ESP32 clock from the camera's timecode (mapped onto
+    // today's date) so the value is a real, current epoch rather than a
     // seconds-since-midnight number (which Gyroflow would read as 1970, i.e.
     // "26 years ago"). The raw timecode is also recorded in "note".
-    long startSeconds = timecodeToSeconds(timecode); // seconds since midnight, or -1
     long timestampEpoch = 0;
-    if(startSeconds >= 0)
-    {
-        // Today's midnight as a UNIX timestamp, plus the timecode's
-        // seconds-since-midnight. Good enough for this optional informational
-        // field; Gyroflow does not rely on it for sync.
-        time_t now = time(nullptr);
-        struct tm tmv;
-        localtime_r(&now, &tmv);
-        tmv.tm_hour = 0;
-        tmv.tm_min = 0;
-        tmv.tm_sec = 0;
-        tmv.tm_isdst = -1;
-        timestampEpoch = mktime(&tmv) + startSeconds;
-    }
+    if(syncRtcFromTimecode(timecode))
+        timestampEpoch = (long)time(nullptr);
     char header[600];
     int n = snprintf(header, sizeof(header),
         "GYROFLOW IMU LOG\n"
