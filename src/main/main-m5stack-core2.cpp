@@ -4291,7 +4291,7 @@ static void imuSampleTest()
 //
 // Set IMU_SD_WRITE_TEST to 1 to run it at boot.
 #ifndef IMU_SD_WRITE_TEST
-#define IMU_SD_WRITE_TEST 0
+#define IMU_SD_WRITE_TEST 1
 #endif
 
 #if IMU_SD_WRITE_TEST
@@ -4308,10 +4308,16 @@ static void imuSdWriteTest()
   SdFat sd;
   if(!sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40))))
   {
-    Serial.println("SdFat begin FAILED");
+    // Print the full SdFat error so we can see WHY the mount failed: the card
+    // type (0 = not detected), the SD error code + data, and the volume fatType.
+    Serial.printf("SdFat begin FAILED: cardType=%d sdErrorCode=0x%02X sdErrorData=0x%08lX fatType=%d\n",
+      (int)sd.card()->type(),
+      (unsigned)sd.sdErrorCode(),
+      (unsigned long)sd.sdErrorData(),
+      (int)sd.fatType());
     for(;;) delay(1000);
   }
-  Serial.printf("SdFat mounted. fatType=%d\n", (int)sd.fatType());
+  Serial.printf("SdFat mounted. fatType=%d cardType=%d\n", (int)sd.fatType(), (int)sd.card()->type());
 
   const char* path = "/imutest.gcsv";
   FatFile file;

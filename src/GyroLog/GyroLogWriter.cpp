@@ -298,6 +298,8 @@ bool GyroLogWriter::ensureSd()
     {
         _sdReady = false;
         _sdStatusMessage = "mount failed (no card / not FAT?)";
+        DEBUG_INFO("[GYRO-DIAG] ensureSd: SdFat begin FAILED cardType=%d sdErrorCode=0x%02X sdErrorData=0x%08lX",
+            (int)_sd.card()->type(), (unsigned)_sd.sdErrorCode(), (unsigned long)_sd.sdErrorData());
         return false;
     }
 
