@@ -1273,8 +1273,11 @@ void BMDCamera::onSlateNameReceived(std::string inSlateName)
         slateName->assign(inSlateName);
     else
         slateName = std::make_shared<std::string>(inSlateName);
-    
+
     modified();
+
+    if(onSlateNameReceivedCb)
+        onSlateNameReceivedCb(inSlateName);
 }
 bool BMDCamera::hasSlateName()
 {

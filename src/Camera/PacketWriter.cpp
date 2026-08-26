@@ -85,18 +85,6 @@ void PacketWriter::writeAutoFocus(BMDCameraConnection* connection)
     validateAndSendCCUCommand(command, connection);
 }
 
-// Ask the camera for the current slate name. This is a void
-// Metadata/SlateForName command sent with the CCU "response" flag set, which
-// prompts the camera to send the value back. MUST be called from the main
-// loop (not the BLE notify handler) because the blocking RSP write deadlocks
-// when issued from the notify context.
-void PacketWriter::writeSlateNameQuery(BMDCameraConnection* connection)
-{
-    CCUPacketTypes::Command command = CCUEncodingFunctions::CreateVoidCommand(CCUPacketTypes::Category::Metadata, (byte)CCUPacketTypes::MetadataParameter::SlateForName);
-    DEBUG_INFO("[SLATE-QUERY] requesting slate name from camera");
-    validateAndSendCCUCommand(command, connection, true);
-}
-
 // Focus position is 0 to 65435
 // NOTE - this uses an offset of the previous value (which works on the URSA Mini G2, whereas a set value does not)
 void PacketWriter::writeFocusPositionWithOffset(int32_t focusPositionOffset, BMDCameraConnection* connection)
