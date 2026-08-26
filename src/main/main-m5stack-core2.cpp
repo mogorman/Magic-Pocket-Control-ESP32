@@ -4517,5 +4517,8 @@ void loop() {
     }
   }
 
-  delay(5);
+  // No blanket delay here: the UI screens self-gate (each Screen_*() returns
+  // early when nothing has changed), so a fast loop is safe, and it lets
+  // gyroLog.poll() at the top of loop() hit its 1 ms (1 kHz) cadence instead of
+  // being throttled to ~166 Hz by a fixed 5 ms pause.
 }
