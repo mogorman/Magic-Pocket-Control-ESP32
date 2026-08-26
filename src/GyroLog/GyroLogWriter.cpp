@@ -448,12 +448,16 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     // rename of a long-named file can leave the new entry with a zero data
     // length, i.e. an empty file. Instead we copy the bytes to the new name
     // and delete the old file, which is robust against that bug.
+    //
+    // Safety: we only delete the original once we have verified the copy has
+    // the same size, so a failed/short copy can never lose the data.
     bool copied = false;
     if(std::strcmp(oldPath, newPath) != 0)
     {
         File src = SD.open(oldPath, FILE_READ);
         if(src)
         {
+            size_t srcSize = src.size();
             File dst = SD.open(newPath, FILE_WRITE);
             if(dst)
             {
@@ -463,7 +467,15 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
                     dst.write(buf, r);
                 dst.flush();
                 dst.close();
-                copied = true;
+
+                // Verify the copy actually holds all the bytes before we dare
+                // delete the original.
+                File chk = SD.open(newPath, FILE_READ);
+                if(chk)
+                {
+                    copied = (chk.size() == srcSize);
+                    chk.close();
+                }
             }
             src.close();
         }
@@ -481,7 +493,7 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
         f.close();
     }
 
-    // Remove the old file now that the copy is in place.
+    // Remove the old file only once the verified copy is in place.
     if(copied)
         SD.remove(oldPath);
 
