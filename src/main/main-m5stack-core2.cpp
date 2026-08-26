@@ -4339,8 +4339,12 @@ void loop() {
   // This runs from the main loop (not the BLE notify handler), so if it does
   // not crash, the earlier slate-query crash was a context problem, not a
   // packet problem.
+  // [DISABLED] The ping proved the request path works; turned off so it stops
+  // toggling the lens. Re-enable by setting kAutoFocusPingEnabled to true.
+  const bool kAutoFocusPingEnabled = false;
   static unsigned long lastAutoFocusPing = 0;
-  if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected &&
+  if(kAutoFocusPingEnabled &&
+     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected &&
      currentTime - lastAutoFocusPing >= 10000)
   {
     lastAutoFocusPing = currentTime;
