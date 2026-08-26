@@ -696,8 +696,12 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     // card) by end(). Move it to the real clip name with SdFat's rename().
     if(std::strcmp(oldPath, newPath) != 0)
     {
+        // Diagnose the rename: is the source file even there after end()/remount?
+        DEBUG_INFO("[GYRO-RENAME] pre-rename: exists('%s')=%d exists('%s')=%d fatType=%d",
+            oldPath, (int)_sd.exists(oldPath), newPath, (int)_sd.exists(newPath), (int)_sd.fatType());
         bool renamed = _sd.rename(oldPath, newPath);
-        DEBUG_INFO("[GYRO-RENAME] rename '%s' -> '%s' ok=%d", oldPath, newPath, (int)renamed);
+        DEBUG_INFO("[GYRO-RENAME] rename '%s' -> '%s' ok=%d (after: exists old=%d new=%d)",
+            oldPath, newPath, (int)renamed, (int)_sd.exists(oldPath), (int)_sd.exists(newPath));
         // The rename dirties the directory again; commit it to the card.
         syncVolume();
     }
