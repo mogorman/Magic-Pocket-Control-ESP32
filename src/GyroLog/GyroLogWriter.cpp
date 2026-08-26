@@ -12,7 +12,7 @@
 // (not the mount); if it corrupts, merely mounting the SD + 1 kHz sampling is
 // the trigger.
 #ifndef GYROLOG_DIAG_MOUNT_ONLY
-#define GYROLOG_DIAG_MOUNT_ONLY 1
+#define GYROLOG_DIAG_MOUNT_ONLY 0
 #endif
 
 #include "GyroLogWriter.h"
@@ -412,6 +412,12 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _file = SD.open(path, FILE_WRITE);
     if(!_file)
         return false;
+    // [DIAG] Is the heap already corrupt right after the VFS open (before any
+    // write)? If yes, the open is the corruptor; if clean, the write is.
+    if(!heap_caps_check_integrity_all(true))
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap ALREADY corrupt right after SD.open");
+    else
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK right after SD.open");
 #endif
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
@@ -463,6 +469,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         kAscale);
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     _file.write((const uint8_t*)header, n);
+    // [DIAG] Is the heap corrupt after the first File::write (the header)?
+    if(!heap_caps_check_integrity_all(true))
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap corrupt after header File::write");
+    else
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK after header File::write");
 #endif
 
     if(!allocRing())
