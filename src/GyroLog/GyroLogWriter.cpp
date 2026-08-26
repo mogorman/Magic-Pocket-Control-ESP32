@@ -400,22 +400,8 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
 #if !GYROLOG_DIAG_NO_SD_WRITE
-    // Open the GCSV with raw FatFs, bypassing the Arduino File/VFS layer whose
-    // write path was corrupting the internal heap at 1 kHz. The SD volume is the
-    // first (and only) FatFs drive, addressed as "0:". We use a drive-letter
-    // path (not the "/sd" VFS mount point) so f_open talks to FatFs directly
-    // instead of going through the VFS.
-    char ffPath[160];
-    snprintf(ffPath, sizeof(ffPath), "0:%s", path);
-    DEBUG_INFO("[GYRO-DIAG] begin(): f_open('%s') ...", ffPath);
-    FRESULT res = f_open(&_ffFile, ffPath, FA_WRITE | FA_CREATE_ALWAYS);
-    _ffOpen = (res == FR_OK);
-    if(!_ffOpen)
-        // FRESULT: 10=NOT_ENABLED 11=NO_FILE 12=NO_PATH 13=INVALID_NAME 14=INT_ERR
-        DEBUG_INFO("[GYRO-DIAG] begin(): f_open FAILED res=%d path='%s'", (int)res, ffPath);
-    else
-        DEBUG_INFO("[GYRO-DIAG] begin(): f_open OK");
-    if(!_ffOpen)
+    _file = SD.open(path, FILE_WRITE);
+    if(!_file)
         return false;
 #endif
 
@@ -467,17 +453,13 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         kGscale,
         kAscale);
 #if !GYROLOG_DIAG_NO_SD_WRITE
-    {
-        UINT written = 0;
-        f_write(&_ffFile, header, (UINT)n, &written);
-    }
+    _file.write((const uint8_t*)header, n);
 #endif
 
     if(!allocRing())
     {
 #if !GYROLOG_DIAG_NO_SD_WRITE
-        f_close(&_ffFile);
-        _ffOpen = false;
+        _file.close();
 #endif
         return false;
     }
@@ -485,6 +467,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _tMs = 0;
     _startMicros = micros();
     _lastSampleMicros = _startMicros;
+    _lastDrainMicros = _startMicros;
 
     _state = State::Recording;
     return true;
@@ -547,9 +530,17 @@ void GyroLogWriter::poll()
     _ringWrite = (_ringWrite + n) % kRingSize;
     _ringCount += (size_t)n;
 
-    // Drain to the file if we have a decent chunk buffered.
-    if(_ringCount >= 4096)
+    // Drain to the file, but rate-limit the SD writes. The 1 kHz sampling fills
+    // the ring continuously; we flush it to the SD card at most once per 50 ms
+    // (20 Hz) and only once a decent chunk has accumulated. This keeps the SD /
+    // SPI / DMA activity far below the sample rate, which is the suspected cause
+    // of the internal-heap corruption. At 1 kHz with ~30-byte rows, 50 ms is
+    // ~1.5 KB, well within the 64 KB ring, so nothing is dropped.
+    if(now - _lastDrainMicros >= 50000 && _ringCount >= 1024)
+    {
+        _lastDrainMicros = now;
         drainRing();
+    }
 }
 
 void GyroLogWriter::drainRing()
@@ -566,20 +557,18 @@ void GyroLogWriter::drainRing()
     _ringCount = 0;
     return;
 #else
-    if(!_ffOpen)
+    if(!_file)
         return;
 
-    // Copy out the contiguous available bytes and write them with raw FatFs.
-    // f_write handles the sector buffering internally; we just hand it our
-    // contiguous chunks. (No per-drain f_sync: data is committed by the
-    // f_close in end(), which is enough for a clip that ends cleanly.)
+    // Copy out the contiguous available bytes and write them. (No per-drain
+    // flush(): data is committed by the flush()/close in end().)
     size_t head = (kRingSize - _ringRead) < _ringCount ? (kRingSize - _ringRead) : _ringCount;
     size_t total = _ringCount;
 
     if(head)
-        f_write(&_ffFile, (const uint8_t*)(_ring + _ringRead), (UINT)head, nullptr);
+        _file.write((const uint8_t*)(_ring + _ringRead), head);
     if(total > head)
-        f_write(&_ffFile, (const uint8_t*)(_ring + 0), (UINT)(total - head), nullptr);
+        _file.write((const uint8_t*)(_ring + 0), total - head);
 
     _ringRead = (_ringRead + total) % kRingSize;
     _ringCount = 0;
@@ -800,25 +789,18 @@ bool GyroLogWriter::end()
     // Flush any remaining buffered samples.
     drainRing();
 #if !GYROLOG_DIAG_NO_SD_WRITE
-    // Close the file (f_close flushes the buffered sectors to the card).
-    f_close(&_ffFile);
-    _ffOpen = false;
+    _file.flush();
 
-    // Capture the summary.
+    // Capture the summary before closing.
     _summary.valid = true;
     _summary.fileName = _startedName + ".gcsv";
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = _tMs;
-    {
-        // Get the final file size by stat-ing the (just closed) file.
-        FILINFO fi;
-        memset(&fi, 0, sizeof(fi));
-        char ffPath[160];
-        snprintf(ffPath, sizeof(ffPath), "0:/%s.gcsv", _startedName.c_str());
-        _summary.fileSizeBytes = (f_stat(ffPath, &fi) == FR_OK) ? (size_t)fi.fsize : 0;
-    }
+    _summary.fileSizeBytes = _file.size();
     _summary.totalBytes = SD.totalBytes();
     _summary.freeBytes = SD.totalBytes() - SD.usedBytes();
+
+    _file.close();
 
     // Commit the file's directory entry (size + clusters) to the card so the
     // file is not read back as 0 bytes on a computer.
