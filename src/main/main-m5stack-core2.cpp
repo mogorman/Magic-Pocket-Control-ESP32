@@ -3826,9 +3826,15 @@ void Screen_GyroLog(bool forceRefresh = false)
     tappedAction = true;
   }
 
-  // The live IMU values change constantly, so always refresh (unless we're
-  // actively recording, in which case the screen is off anyway).
-  if(!forceRefresh && !tappedAction && gyroLog.isRecording())
+  // While actively recording the screen is turned off (the IMU is being
+  // sampled and written to the SD card). Don't draw anything and don't touch
+  // the display while in this state.
+  if(gyroLog.isRecording())
+    return;
+
+  // The live IMU values change constantly, so always refresh unless the screen
+  // content is unchanged and nothing was pressed.
+  if(!forceRefresh && !tappedAction && lastRefreshedScreen == camera->getLastModified())
     return;
   lastRefreshedScreen = camera->getLastModified();
 
@@ -3845,14 +3851,7 @@ void Screen_GyroLog(bool forceRefresh = false)
   // M5GFX, set font here rather than on each drawString line
   sprite->setFont(&Lato_Regular11pt7b);
 
-  if(gyroLog.isRecording())
-  {
-    // Actively recording: the screen is off, but if it's somehow on, show a
-    // simple status line.
-    sprite->setTextColor(TFT_RED);
-    sprite->drawString("Recording gyro...", 30, 60);
-  }
-  else if(gyroLog.getSummary().valid)
+  if(gyroLog.getSummary().valid)
   {
     // Summary mode: show the details of the last clip written.
     const GyroLogWriter::Summary& s = gyroLog.getSummary();
@@ -3930,6 +3929,12 @@ void Screen_GyroLog(bool forceRefresh = false)
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
+
+    // SD card status diagnostic (top-right). Green when ready, red otherwise.
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("SD CARD", 230, 40, &Lato_Regular5pt7b);
+    sprite->setTextColor(gyroLog.sdReady() ? TFT_GREEN : TFT_RED);
+    sprite->drawString(gyroLog.sdStatusMessage().c_str(), 230, 53, &Lato_Regular6pt7b);
   }
 
   sprite->pushSprite(0, 0);
@@ -4065,6 +4070,10 @@ void loop() {
             }
           }
 
+          // Turn the display off for the duration of the clip (the IMU is
+          // being sampled and written to the SD card).
+          tft.setBrightness(0);
+
           gyroLog.begin(clipName, ext, cam->getTimecodeString());
         }
         else
@@ -4075,6 +4084,11 @@ void loop() {
           if(cam->hasSlateName())
             gyroLog.maybeRenameFromSlate(cam->getSlateName(), "braw");
           gyroLog.end();
+
+          // Bring the display back on and force a refresh of the (now
+          // summary) screen.
+          tft.setBrightness(127);
+          lastRefreshedScreen = 0;
         }
       });
     }

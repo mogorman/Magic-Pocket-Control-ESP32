@@ -77,6 +77,14 @@ public:
 
     const Summary& getSummary() const { return _summary; }
 
+    // SD card status, for the on-screen diagnostic.
+    //   true  = a card is present and the filesystem is mounted
+    //   false = no card, or the mount failed
+    bool sdReady() const { return _sdReady; }
+    // Human-readable message about the last SD attempt (e.g. "no card",
+    // "mount failed", "ready"). Empty until the first attempt.
+    const std::string& sdStatusMessage() const { return _sdStatusMessage; }
+
     // ---- Orientation (calibration) ----
     // Returns the current orientation token index (0..23).
     int getOrientationIndex() const { return _orientationIndex; }
@@ -119,6 +127,10 @@ private:
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
 
+    // SD card status (for the on-screen diagnostic).
+    bool _sdReady = false;
+    std::string _sdStatusMessage;
+
     // The summary of the most recently completed clip.
     Summary _summary;
 
@@ -131,6 +143,10 @@ private:
 
     // Allocate the ring buffer in PSRAM. Returns true on success.
     bool allocRing();
+
+    // Make sure the SD card is mounted (CS pin GPIO4). Sets _sdReady and
+    // _sdStatusMessage. Returns true if the card is ready.
+    bool ensureSd();
 
     // Persist / load the orientation index via NVS.
     void saveOrientation();

@@ -110,6 +110,40 @@ bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* a
     return okG && okA;
 }
 
+bool GyroLogWriter::ensureSd()
+{
+    // If the filesystem is already mounted, it's ready.
+    if(SD.cardSize() > 0)
+    {
+        _sdReady = true;
+        _sdStatusMessage = "ready";
+        return true;
+    }
+
+    // Not mounted yet. The Core2's microSD slot is on the SPI bus with its
+    // chip-select on GPIO4. The Arduino SD library's default CS is the
+    // variant's SS pin (GPIO5 on the Core2), which is actually the LCD's CS,
+    // so we must pass the correct pin explicitly or the card never mounts.
+    if(!SD.begin(4))
+    {
+        _sdReady = false;
+        _sdStatusMessage = "mount failed (no card / not FAT?)";
+        return false;
+    }
+
+    // begin() returned true, but double-check a card is actually present.
+    if(SD.cardSize() > 0)
+    {
+        _sdReady = true;
+        _sdStatusMessage = "ready";
+        return true;
+    }
+
+    _sdReady = false;
+    _sdStatusMessage = "no card detected";
+    return false;
+}
+
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode)
 {
     if(_state == State::Recording)
@@ -117,12 +151,9 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
     loadOrientation();
 
-    // Make sure the SD card is up.
-    if(!SD.cardSize())
-    {
-        if(!SD.begin())
-            return false;
-    }
+    // Make sure the SD card is mounted before we try to open the file.
+    if(!ensureSd())
+        return false;
 
     _startedName = clipName;
     _extension = extension;
