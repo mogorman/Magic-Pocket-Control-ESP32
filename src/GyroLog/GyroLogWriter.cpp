@@ -378,11 +378,19 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     }
 
     // Pre-allocate the file up front so the SD card never has to search for
-    // free clusters mid-write (the high-speed-logging pattern). We reserve a
-    // generous size; any unused pre-allocated space is removed by truncate() at
-    // close. 14 MB is ~46 s at 1 kHz (30 B/row) -- enough for most clips, and
-    // SdFat grows it if needed.
-    _file.preAllocate(14UL * 1024 * 1024);
+    // free clusters mid-write (the high-speed-logging pattern). Any unused
+    // pre-allocated space is removed by truncate() at close.
+    //
+    // Size it for a full hour of 1 kHz data: 3,600,000 samples x ~34 B/row
+    // (typical) is ~122 MB, and ~155 MB in the worst case where every field is
+    // full-width. Reserve 160 MB to cover the worst case with headroom; SdFat
+    // grows it beyond that only if a clip runs longer than an hour.
+    //
+    // preAllocate() needs that much *contiguous* free space; on a nearly-full
+    // card it can fail. That's not fatal -- we just log it and record without
+    // pre-allocation (the file still grows normally, allocating as it goes).
+    if(!_file.preAllocate(160UL * 1024 * 1024))
+        DEBUG_INFO("[GYRO] begin(): preAllocate(160 MB) failed (card too full/fragmented?) -- recording without pre-allocation");
 
     // Wire the ring buffer to the file. The sampler writes rows into the ring;
     // drainRing() calls ring.writeOut() to commit them to the file.
