@@ -72,6 +72,10 @@ public:
     // recording (cheap no-op if nothing to do).
     void maybeRenameFromSlate(const std::string& slateName, const std::string& extension);
 
+    // Set the timecode string to record as the "end" timecode in the summary
+    // (call just before end()).
+    void setTimecodeAtEnd(const std::string& timecode) { _summary.timecodeAtEnd = timecode; }
+
     State state() const { return _state; }
     bool isRecording() const { return _state == State::Recording; }
 

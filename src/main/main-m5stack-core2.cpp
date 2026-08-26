@@ -4052,9 +4052,19 @@ void loop() {
         {
           auto cam = BMDControlSystem::getInstance()->getCamera();
 
-          // Choose the clip name: the camera's slate name if it has one,
-          // otherwise a generic "clip_NNNN" name.
-          std::string clipName = cam->hasSlateName() ? cam->getSlateName() : nextGyroClipName();
+          // Choose the clip name: the camera's slate name if it has a *real*
+          // one, otherwise a generic "clip_NNNN" name. The camera sends
+          // "Next Clip" as a placeholder slate name (it has no real clip name
+          // yet), so we treat that as "no name" and use the generated one.
+          std::string clipName;
+          if(cam->hasSlateName())
+          {
+            std::string slate = cam->getSlateName();
+            if(slate != "Next Clip" && slate != "next clip")
+              clipName = slate;
+          }
+          if(clipName.empty())
+            clipName = nextGyroClipName();
 
           // Choose the video extension from the codec (default .braw).
           std::string ext = "braw";
@@ -4078,11 +4088,19 @@ void loop() {
         }
         else
         {
-          // If a slate name arrived after we started with a generic name,
-          // rename the in-progress file before finalising.
           auto cam = BMDControlSystem::getInstance()->getCamera();
+
+          // If a real slate name arrived after we started with a generic name,
+          // rename the in-progress file before finalising.
           if(cam->hasSlateName())
-            gyroLog.maybeRenameFromSlate(cam->getSlateName(), "braw");
+          {
+            std::string slate = cam->getSlateName();
+            if(slate != "Next Clip" && slate != "next clip")
+              gyroLog.maybeRenameFromSlate(slate, "braw");
+          }
+
+          // Capture the timecode at the moment recording stopped.
+          gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
           gyroLog.end();
 
           // Bring the display back on and force a refresh of the (now

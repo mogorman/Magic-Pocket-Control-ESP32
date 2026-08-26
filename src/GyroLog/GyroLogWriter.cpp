@@ -47,6 +47,62 @@ static const float kAscale = 8.0f / 32768.0f;
 // tscale: t is in ms, so seconds = t * 0.001
 static const char* kTscale = "0.001";
 
+// Convert a camera timecode string ("HH:MM:SS:FF" or drop-frame "HH:MM:SS;FF")
+// to whole seconds since midnight. Returns -1 if the string can't be parsed.
+// The frame field is ignored (the GCSV "timestamp" is a whole-second value and
+// Gyroflow treats it as optional/informational).
+static long timecodeToSeconds(const std::string& tc)
+{
+    if(tc.size() < 8)
+        return -1;
+
+    // Normalise the drop-frame separator (';') to ':' so one sscanf handles
+    // both forms.
+    std::string norm = tc;
+    for(char& c : norm)
+        if(c == ';')
+            c = ':';
+
+    int h, m, s, f;
+    if(sscanf(norm.c_str(), "%d:%d:%d:%d", &h, &m, &s, &f) != 4)
+        return -1;
+
+    if(h < 0 || h > 23 || m < 0 || m > 59 || s < 0 || s > 59)
+        return -1;
+
+    return (long)h * 3600 + (long)m * 60 + s;
+}
+
+// Turn a raw clip/slate name into a safe file-name base. Placeholder slate
+// names the camera sends (e.g. "Next Clip") are dropped (returns empty), and
+// any characters that are unsafe in a file name are replaced with '_'.
+static std::string sanitiseClipName(const std::string& name)
+{
+    // Trim surrounding whitespace.
+    size_t b = name.find_first_not_of(" \t");
+    size_t e = name.find_last_not_of(" \t");
+    if(b == std::string::npos)
+        return ""; // blank
+    std::string trimmed = name.substr(b, e - b + 1);
+
+    // The camera uses "Next Clip" as a placeholder slate name (it has no real
+    // clip name yet). Don't use that as a file name.
+    if(trimmed == "Next Clip" || trimmed == "next clip")
+        return "";
+
+    std::string out;
+    out.reserve(trimmed.size());
+    for(char c : trimmed)
+    {
+        if((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+            || c == '_' || c == '-' || c == '.')
+            out += c;
+        else
+            out += '_';
+    }
+    return out;
+}
+
 const char* GyroLogWriter::kNvsNamespace = "GyroLog";
 const char* GyroLogWriter::kNvsKeyOrientation = "orient";
 
@@ -155,20 +211,26 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     if(!ensureSd())
         return false;
 
-    _startedName = clipName;
+    // Sanitise the clip name (drops placeholder slate names like "Next Clip"
+    // and replaces any file-name-unsafe characters). The caller falls back to a
+    // generated "clip_NNNN" name when this comes back empty.
+    _startedName = sanitiseClipName(clipName);
+    if(_startedName.empty())
+        _startedName = clipName; // shouldn't happen; caller handles the fallback
     _extension = extension;
     _renamedFromSlate = false;
 
     char path[128];
-    snprintf(path, sizeof(path), "/%s.gcsv", clipName.c_str());
+    snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _file = SD.open(path, FILE_WRITE);
     if(!_file)
         return false;
 
     // The GCSV "timestamp" field is documented as a UNIX timestamp and is
-    // optional (Gyroflow syncs on the "t" column, not this). We leave it 0 and
-    // record the camera's timecode at the moment recording started in "note",
-    // which is more useful for matching the log to the clip.
+    // optional (Gyroflow syncs on the "t" column, not this). We derive it from
+    // the camera's timecode at the moment recording started (whole seconds
+    // since midnight), and also record the raw timecode in "note".
+    long startSeconds = timecodeToSeconds(timecode);
     char header[600];
     int n = snprintf(header, sizeof(header),
         "GYROFLOW IMU LOG\n"
@@ -177,7 +239,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         "orientation,%s\n"
         "note,M5Stack Core2 gyro log ~1kHz; start TC %s\n"
         "fwversion,1.0.0\n"
-        "timestamp,0\n"
+        "timestamp,%ld\n"
         "vendor,m5stack\n"
         "videofilename,%s.%s\n"
         "tscale,%s\n"
@@ -186,7 +248,8 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         "t,gx,gy,gz,ax,ay,az\n",
         GyroLogWriter::orientationToken(_orientationIndex),
         timecode.c_str(),
-        clipName.c_str(),
+        (startSeconds >= 0) ? startSeconds : 0L,
+        _startedName.c_str(),
         extension.c_str(),
         kTscale,
         kGscale,
