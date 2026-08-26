@@ -4135,6 +4135,19 @@ void loop() {
         else
         {
           // ---- RECORD STOP ----
+          // This callback also fires when *we* switch the camera into playback
+          // to read the clip name (Record -> Play is a "recording stopped"
+          // transition). A genuine stop lands in Preview; our playback switch
+          // lands in Play. So if the new mode is Play, this is the spurious
+          // one from our own switch - ignore it so the sequence isn't
+          // re-armed and the state can settle back to Idle.
+          if(cam->hasTransportMode() &&
+             cam->getTransportMode().mode == CCUPacketTypes::MediaTransportMode::Play)
+          {
+            DEBUG_INFO("[GYRO] record-stop callback ignored (we just switched to Play)");
+            return;
+          }
+
           // Finalise the GCSV log now (data is complete).
           gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
           if(gyroLog.end())
