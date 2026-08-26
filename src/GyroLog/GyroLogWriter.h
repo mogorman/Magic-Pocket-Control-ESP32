@@ -127,13 +127,15 @@ public:
 private:
     State _state = State::Idle;
 
-    // The GCSV file we are writing. We use the Arduino File (which goes through
-    // the ESP32 VFS -> FatFs with the VFS's own locking) rather than calling
-    // FatFs f_open/f_write directly: a direct f_open on the "0:" drive bypasses
-    // the VFS and corrupts the shared FATFS state. The data is written in small
-    // chunks from a dedicated writer task (see GyroLogWriter::writerTask) so the
+    // The GCSV file, as a POSIX VFS file descriptor. We deliberately do NOT use
+    // the Arduino File / newlib stdio (fwrite) path: newlib's FILE* buffering
+    // corrupts the internal heap when exercised during 1 kHz I2C sampling (the
+    // __sfvwrite_r -> memmove fault we kept hitting). Instead we open the file
+    // with the VFS open() syscall and write with the VFS write() syscall, which
+    // routes straight to the FatFs f_write handler with no newlib FILE buffer.
+    // The data is written in small chunks from a dedicated writer task so the
     // 1 kHz I2C sampling on the loop task never does SD work itself.
-    File _file;
+    int _fd = -1;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
