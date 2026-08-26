@@ -3,6 +3,8 @@
 #include <M5Unified.h>
 #include <nvs.h>
 #include <esp_heap_caps.h> // heap_caps_free (the correct free for ps_malloc'd PSRAM)
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h> // uxTaskGetStackHighWaterMark (stack-overflow diagnostic)
 #include <math.h>
 #include <cstring>
 #include <time.h>
@@ -698,6 +700,18 @@ bool GyroLogWriter::end()
 {
     if(_state != State::Recording)
         return false;
+
+    // [DIAG] One-shot health check right before the SD remount that has been
+    // crashing (heap TLSF assert in ff_memalloc). end() runs on the main loop
+    // task, so uxTaskGetStackHighWaterMark(NULL) reports that task's stack
+    // high-water mark (bytes still free at its deepest point). A value near 0
+    // means the loop stack is overflowing, which would corrupt the adjacent
+    // internal heap. Also reports free internal/PSRAM heap.
+    {
+        UBaseType_t hw = uxTaskGetStackHighWaterMark(NULL);
+        DEBUG_INFO("[GYRO-DIAG] end(): loop stack HWM=%u bytes free, internal free=%lu, psram free=%lu",
+            (unsigned)hw, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+    }
 
     // Flush any remaining buffered samples.
     drainRing();
