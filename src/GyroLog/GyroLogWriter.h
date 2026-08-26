@@ -167,6 +167,11 @@ private:
     // _sdStatusMessage. Returns true if the card is ready.
     bool ensureSd();
 
+    // Force the FAT volume's cached directory entries to be written to the
+    // card (unmount + remount). Call after closing a file so its size is not
+    // read back as 0 bytes on a computer.
+    void syncVolume();
+
     // Persist / load the orientation index via NVS.
     void saveOrientation();
 };

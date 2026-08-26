@@ -248,6 +248,22 @@ bool GyroLogWriter::ensureSd()
     return false;
 }
 
+// Force the FAT volume's cached directory entries (file sizes + cluster
+// pointers) to be written to the card. File::close() only flushes the file's
+// own data buffer; the directory entry that records a file's size lives in a
+// separate RAM cache that FatFs otherwise only commits on the next directory
+// operation or on unmount. Because we close the log and then just sit idle,
+// that directory update never reaches the card, so the file shows as 0 bytes
+// when the card is read on a computer. Unmounting and remounting forces the
+// commit. The Core2 mounts the microSD on CS pin 4 (see ensureSd()).
+void GyroLogWriter::syncVolume()
+{
+    if(SD.cardSize() == 0)
+        return; // not mounted
+    SD.end();
+    SD.begin(4);
+}
+
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode)
 {
     if(_state == State::Recording)
@@ -383,48 +399,6 @@ void GyroLogWriter::drainRing()
     _file.flush();
 }
 
-// Rewrite the "videofilename" line in a GCSV file's header. The header is a
-// fixed block of lines at the start of the file, so we seek to the beginning,
-// read it, replace the one line, and write it back; the data rows that follow
-// are untouched. Returns true if the line was found and rewritten.
-static bool rewriteVideoFileNameLine(File& file, const std::string& videoFileName)
-{
-    file.flush();
-    file.seek(0);
-
-    const size_t kMaxHeader = 1024;
-    uint8_t raw[kMaxHeader];
-    size_t n = file.read(raw, kMaxHeader);
-    if(n == 0)
-        return false;
-    char* buf = (char*)raw;
-    buf[n] = '\0';
-
-    // Find the "videofilename," line and replace it.
-    char* lineStart = strstr(buf, "videofilename,");
-    if(!lineStart)
-        return false;
-    char* lineEnd = strchr(lineStart, '\n');
-    if(!lineEnd)
-        return false;
-
-    // Build the replacement line and the full new header. We cannot shrink the
-    // file (the SD File API has no truncate), so if the new header is shorter
-    // than the old one a trailing byte or two is left over; the GCSV parser
-    // ignores trailing content after the "t,gx,..." column line, so that is
-    // harmless.
-    std::string newLine = "videofilename," + videoFileName + "\n";
-
-    std::string header(buf, (size_t)(lineStart - buf));
-    header += newLine;
-    header += std::string(lineEnd + 1, (size_t)(buf + n - (lineEnd + 1)));
-
-    file.seek(0);
-    file.write((const uint8_t*)header.data(), header.size());
-    file.flush();
-    return true;
-}
-
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
 {
     // Only meaningful right after a log has been finalised.
@@ -444,50 +418,16 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     snprintf(oldPath, sizeof(oldPath), "/%s.gcsv", _startedName.c_str());
     snprintf(newPath, sizeof(newPath), "/%s.gcsv", name.c_str());
 
-    // The file was already closed by end(). Move it to the real clip name with
-    // SD.rename() (a FatFs f_rename). We log the size before and after the
-    // rename so we can see on the serial monitor exactly where the data is
-    // lost if the rename misbehaves with long (LFN) names.
-    bool renamed = false;
+    // The file was already closed (and its directory entry committed to the
+    // card) by end(). Move it to the real clip name with SD.rename() (a FatFs
+    // f_rename). We deliberately do not rewrite the "videofilename" header
+    // line here — just the rename.
     if(std::strcmp(oldPath, newPath) != 0)
     {
-        // Size of the source file before the rename.
-        size_t beforeSize = 0;
-        {
-            File chk = SD.open(oldPath, FILE_READ);
-            if(chk)
-            {
-                beforeSize = chk.size();
-                chk.close();
-            }
-        }
-        DEBUG_INFO("[GYRO-RENAME] before: '%s' size=%u", oldPath, (unsigned)beforeSize);
-
-        renamed = SD.rename(oldPath, newPath);
-
-        // Size of the destination file after the rename.
-        size_t afterSize = 0;
-        bool afterExists = false;
-        {
-            File chk = SD.open(newPath, FILE_READ);
-            if(chk)
-            {
-                afterExists = true;
-                afterSize = chk.size();
-                chk.close();
-            }
-        }
-        DEBUG_INFO("[GYRO-RENAME] rename ok=%d  after: '%s' exists=%d size=%u",
-                   (int)renamed, newPath, (int)afterExists, (unsigned)afterSize);
-    }
-
-    // Update the "videofilename" header line in the (possibly renamed) file.
-    const char* finalPath = renamed ? newPath : oldPath;
-    File f = SD.open(finalPath, FILE_WRITE);
-    if(f)
-    {
-        rewriteVideoFileNameLine(f, name + "." + extension);
-        f.close();
+        bool renamed = SD.rename(oldPath, newPath);
+        DEBUG_INFO("[GYRO-RENAME] rename '%s' -> '%s' ok=%d", oldPath, newPath, (int)renamed);
+        // The rename dirties the directory again; commit it to the card.
+        syncVolume();
     }
 
     // Reflect the new names in the summary shown on the Gyro Log screen.
@@ -517,6 +457,10 @@ bool GyroLogWriter::end()
     _summary.freeBytes = SD.totalBytes() - SD.usedBytes();
 
     _file.close();
+
+    // Commit the file's directory entry (size + clusters) to the card so the
+    // file is not read back as 0 bytes on a computer.
+    syncVolume();
 
     if(_ring)
     {
