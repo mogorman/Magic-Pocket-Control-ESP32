@@ -158,31 +158,24 @@ static unsigned long lastRefreshedScreen = 0;
 // use to rename the .gcsv to match the video file. Once the name is received
 // we switch the camera back to its previous (record/preview) state.
 //
-// The whole sequence is driven from the main loop (never the BLE notify
-// handler, where a blocking write would deadlock). State is a small machine:
-//   Idle -> (record stop) -> WaitingPlayback -> (playback armed) ->
-//   WaitingSlateName -> (name received) -> (switch back) -> Idle
-static enum GyroNameState
-{
-  GyroNameIdle = 0,        // not in the middle of a name-capture sequence
-  GyroNameWaitPlayback = 1, // about to / just sent the playback command
-  GyroNameWaitSlate = 2     // in playback, waiting for the clip name to arrive
-} gyroNameState = GyroNameIdle;
-
-// The transport mode the camera was in before we forced playback, so we can
-// restore it (Preview vs Record) once we have the name.
-static CCUPacketTypes::MediaTransportMode gyroPrevTransportMode = CCUPacketTypes::MediaTransportMode::Preview;
+// The clip-name capture is a single boolean, not a multi-state machine:
+//   * On a genuine record stop we flip the camera into PLAYBACK and set
+//     gyroInPlayback to true.
+//   * While gyroInPlayback is true we wait for the camera to push the real
+//     clip name (it does so repeatedly while in playback). The first real name
+//     renames the GCSV and we flip the camera back to RECORD and clear the
+//     flag. A 6-second timeout does the same in case no name arrives.
+//   * The record start/stop callbacks ignore everything while gyroInPlayback is
+//     set, so the playback/record toggling we do ourselves can't re-trigger
+//     them. The next genuine record stop simply sets the flag again.
+//
+// All the actual BLE writes happen in the main loop (never the notify
+// handler, where a blocking write would deadlock).
+static bool gyroInPlayback = false;
 
 // The codec in effect when the clip started, so we can build the correct file
 // extension for the video file name once we have the base name.
 static CCUPacketTypes::BasicCodec gyroStartCodec = CCUPacketTypes::BasicCodec::BRAW;
-
-// A short guard so we only act on the first real slate name after playback.
-static bool gyroSlateNameSeen = false;
-
-// Set when we have the clip name and need the main loop to switch the camera
-// back to its previous transport mode (record/preview).
-static bool gyroSwitchBackArmed = false;
 
 // Button pressed indications for use in each individual page
 bool btnAPressed = false;
@@ -4112,6 +4105,13 @@ void loop() {
           (int)slateIsPlaceholder,
           cam->getTimecodeString().c_str());
 
+        // While we are in playback reading the clip name, the camera toggles
+        // between record/preview/play as we drive it. Ignore all of that; the
+        // real start/stop of the *next* clip will arrive once we've flipped
+        // back to record.
+        if(gyroInPlayback)
+          return;
+
         if(recording)
         {
           // ---- RECORD START ----
@@ -4135,33 +4135,14 @@ void loop() {
         else
         {
           // ---- RECORD STOP ----
-          // This callback also fires when *we* switch the camera into playback
-          // to read the clip name (Record -> Play is a "recording stopped"
-          // transition). A genuine stop lands in Preview; our playback switch
-          // lands in Play. So if the new mode is Play, this is the spurious
-          // one from our own switch - ignore it so the sequence isn't
-          // re-armed and the state can settle back to Idle.
-          if(cam->hasTransportMode() &&
-             cam->getTransportMode().mode == CCUPacketTypes::MediaTransportMode::Play)
-          {
-            DEBUG_INFO("[GYRO] record-stop callback ignored (we just switched to Play)");
-            return;
-          }
-
           // Finalise the GCSV log now (data is complete).
           gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
           if(gyroLog.end())
             DEBUG_INFO("[GYRO] ended log, duration %lu ms", (unsigned long)gyroLog.getSummary().durationMs);
 
-          // Remember the transport mode we are leaving so we can restore it
-          // after we learn the clip name.
-          if(cam->hasTransportMode())
-            gyroPrevTransportMode = cam->getTransportMode().mode;
-
-          // Arm the playback switch. The actual command is sent from the main
-          // loop (a blocking BLE write must not run from this notify handler).
-          gyroNameState = GyroNameWaitPlayback;
-          gyroSlateNameSeen = false;
+          // Flip the camera into playback (from the main loop) so it reports
+          // the real clip name. Mark that we're in the playback-reading phase.
+          gyroInPlayback = true;
 
           // Bring the display back on and force a refresh of the screen.
           tft.setBrightness(127);
@@ -4175,21 +4156,19 @@ void loop() {
       // to rename the GCSV, then tell the main loop to switch the camera back.
       camera->setOnSlateNameReceived([](const std::string& name)
       {
-        // Only act while we are in the "waiting for the name" phase of the
-        // playback sequence, and only on a real name (not the "Next Clip"
-        // placeholder the camera sends at other times).
-        if(gyroNameState != GyroNameWaitSlate)
+        // Only act while we are in playback reading the clip name, and only on
+        // a real name (not the "Next Clip" placeholder the camera sends at
+        // other times). The camera re-sends the name repeatedly while in
+        // playback, so once we've used it we flip back to record and clear
+        // gyroInPlayback; any further repeats are then ignored.
+        if(!gyroInPlayback)
           return;
         if(name == "Next Clip" || name == "next clip" || name.empty())
           return;
-        if(gyroSlateNameSeen)
-          return;
-        gyroSlateNameSeen = true;
 
         DEBUG_INFO("[GYRO] got clip name from playback: '%s'", name.c_str());
 
         // Rename the finalised GCSV to match the real video file name.
-        auto cam = BMDControlSystem::getInstance()->getCamera();
         std::string ext = "braw";
         switch(gyroStartCodec)
         {
@@ -4201,9 +4180,8 @@ void loop() {
         }
         gyroLog.applySlateName(name, ext);
 
-        // Ask the main loop to switch the camera back to its previous mode.
-        gyroNameState = GyroNameIdle;
-        gyroSwitchBackArmed = true;
+        // We have the name; tell the main loop to flip back to record.
+        gyroInPlayback = false;
       });
     }
 
@@ -4447,21 +4425,24 @@ void loop() {
   }
 
   // ---- Clip-name capture via playback ----
-  // After a clip stops we switch the camera into PLAYBACK so it pushes the
-  // real clip file name over CCU. Once the name arrives (handled in the slate
-  // callback) we switch the camera back to its previous transport mode. All of
-  // this runs from the main loop, never the BLE notify handler.
-  if(gyroNameState == GyroNameWaitPlayback &&
+  // Driven entirely by the single gyroInPlayback flag:
+  //   * just after a record stop we set it and (below) flip the camera into
+  //     playback so it reports the real clip name;
+  //   * the slate callback clears it once the name arrives (renaming the GCSV);
+  //   * a 6s timeout clears it too, in case no name ever arrives.
+  // Whichever clears it, we then flip the camera back to record. All the BLE
+  // writes happen here in the main loop, never the notify handler.
+  static bool gyroPlaybackCommandSent = false;
+  static unsigned long gyroPlaybackWaitStart = 0;
+
+  if(gyroInPlayback &&
      cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
-    // Give the record-stop a moment to settle before we change transport mode.
-    static unsigned long playbackSentAt = 0;
-    if(playbackSentAt == 0)
+    // 1) Send the playback command once, right after the record stop.
+    if(!gyroPlaybackCommandSent)
     {
-      playbackSentAt = currentTime;
-      // Move to playback. We reuse the last known transport info and just
-      // change the mode; the camera then reports the clip being played back,
-      // which carries its file name.
+      gyroPlaybackCommandSent = true;
+      gyroPlaybackWaitStart = currentTime;
       auto cam = BMDControlSystem::getInstance()->getCamera();
       if(cam && cam->hasTransportMode())
       {
@@ -4469,51 +4450,34 @@ void loop() {
         ti.mode = CCUPacketTypes::MediaTransportMode::Play;
         DEBUG_INFO("[GYRO] switching camera to PLAYBACK to read clip name");
         PacketWriter::writeTransportInfo(ti, &cameraConnection);
-        gyroNameState = GyroNameWaitSlate;
       }
       else
       {
         DEBUG_ERROR("[GYRO] no transport mode; can't switch to playback");
-        gyroNameState = GyroNameIdle;
+        gyroInPlayback = false;
       }
     }
-  }
 
-  // Safety: if we switched to playback but no clip name arrives within a few
-  // seconds (e.g. the camera didn't report one), switch back anyway so we don't
-  // leave the camera stuck in playback.
-  static unsigned long slateWaitStart = 0;
-  if(gyroNameState == GyroNameWaitSlate)
-  {
-    if(slateWaitStart == 0)
-      slateWaitStart = currentTime;
-    if(currentTime - slateWaitStart > 6000)
+    // 2) If no clip name has arrived within 6s, give up and flip back.
+    if(gyroInPlayback && currentTime - gyroPlaybackWaitStart > 6000)
     {
       DEBUG_INFO("[GYRO] no clip name after 6s in playback; switching back");
-      slateWaitStart = 0;
-      gyroNameState = GyroNameIdle;
-      gyroSwitchBackArmed = true;
+      gyroInPlayback = false;
     }
   }
-  else
-  {
-    slateWaitStart = 0; // reset the timer whenever we're not waiting for a name
-  }
 
-  // Switch the camera back to its previous transport mode now that we have the
-  // clip name (or gave up waiting).
-  if(gyroSwitchBackArmed &&
+  // 3) Whenever we leave the playback-reading phase (name received or timeout),
+  //    flip the camera back to record so it's ready for the next clip.
+  if(!gyroInPlayback && gyroPlaybackCommandSent &&
      cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
-    gyroSwitchBackArmed = false;
+    gyroPlaybackCommandSent = false;
     auto cam = BMDControlSystem::getInstance()->getCamera();
     if(cam && cam->hasTransportMode())
     {
       TransportInfo ti = cam->getTransportMode();
-      ti.mode = gyroPrevTransportMode; // restore Preview or Record as before
-      DEBUG_INFO("[GYRO] switching camera back to %s",
-        gyroPrevTransportMode == CCUPacketTypes::MediaTransportMode::Record ? "Record" :
-        (gyroPrevTransportMode == CCUPacketTypes::MediaTransportMode::Play ? "Play" : "Preview"));
+      ti.mode = CCUPacketTypes::MediaTransportMode::Record;
+      DEBUG_INFO("[GYRO] switching camera back to Record");
       PacketWriter::writeTransportInfo(ti, &cameraConnection);
     }
   }
