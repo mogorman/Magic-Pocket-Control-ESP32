@@ -4291,15 +4291,22 @@ static void imuSampleTest()
 //
 // Set IMU_SD_WRITE_TEST to 1 to run it at boot.
 #ifndef IMU_SD_WRITE_TEST
-#define IMU_SD_WRITE_TEST 0
+#define IMU_SD_WRITE_TEST 1
 #endif
 
 #if IMU_SD_WRITE_TEST
+// When 0, the test skips preAllocate() (and the matching truncate() at close)
+// so we can compare start/stop speed and confirm the pre-allocation is what
+// makes begin()/end() slow. Default 1 = current (pre-allocated) behaviour.
+#ifndef SD_TEST_PREALLOCATE
+#define SD_TEST_PREALLOCATE 0
+#endif
+
 static void imuSdWriteTest()
 {
   Serial.begin(115200);
   delay(500);
-  Serial.println("\n=== IMU 1 kHz -> SdFat 14 MB WRITE TEST ===");
+  Serial.printf("\n=== IMU 1 kHz -> SdFat 14 MB WRITE TEST (preAllocate=%d) ===\n", SD_TEST_PREALLOCATE);
 
   // Bump the ODR to 1 kHz, exactly as the real logger does.
   M5.In_I2C.writeRegister8(0x68, 0x19, 0x00, 400000); // SMPLRT_DIV = 0 -> 1 kHz
@@ -4336,9 +4343,15 @@ static void imuSdWriteTest()
     Serial.printf("open FAILED for %s (err=%d)\n", path, (int)file.getError());
     for(;;) delay(1000);
   }
+#if SD_TEST_PREALLOCATE
   // Pre-allocate 14 MB up front (the high-speed-logging pattern) so the card
   // never searches for free clusters mid-write.
+  uint32_t tPre = micros();
   file.preAllocate(14UL * 1024 * 1024);
+  Serial.printf("preAllocate(14 MB) took %lu us\n", (unsigned long)(micros() - tPre));
+#else
+  Serial.println("preAllocate skipped (SD_TEST_PREALLOCATE=0)");
+#endif
 
   // The ring buffer that decouples the 1 kHz sampling from the SD write,
   // exactly as GyroLogWriter uses it.
@@ -4439,11 +4452,17 @@ static void imuSdWriteTest()
       break;
   }
 
-  // Final drain + close (truncate the unused pre-allocated space, sync, close).
+  // Final drain + close. If we pre-allocated, truncate() frees the unused
+  // pre-allocated clusters and shrinks the file to the real written size; if we
+  // didn't pre-allocate, the file is already the right size so we skip it.
   writtenBytes += ring.bytesUsed();
   ring.writeOut(ring.bytesUsed());
+#if SD_TEST_PREALLOCATE
+  uint32_t tTrunc = micros();
   file.truncate();
-  uint64_t finalSize = file.fileSize(); // real on-card size after truncate
+  Serial.printf("truncate() took %lu us\n", (unsigned long)(micros() - tTrunc));
+#endif
+  uint64_t finalSize = file.fileSize(); // real on-card size
   file.sync();
   file.close();
   // Commit the directory entry to the card (unmount + remount).
