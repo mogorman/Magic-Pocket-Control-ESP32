@@ -4057,11 +4057,10 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 void loop() {
 
-  // [GYRO LOGGING TEMPORARILY DISABLED for slate/timecode debugging]
   // Keep the gyro log sampling at ~1 kHz while a clip is being recorded. This
   // runs regardless of the 5 ms UI delay below so the sample cadence stays
   // tight. (No-op when not recording.)
-  // gyroLog.poll();
+  gyroLog.poll();
 
   static unsigned long lastConnectedTime = 0;
   const unsigned long reconnectInterval = 5000;  // 5 seconds (milliseconds)
