@@ -9,7 +9,7 @@
     #include <TFT_eSPI.h>
     #include "BLE_TFT_eSPI/ScreenSecurityHandler.h"
 #elif USING_M5_BUTTONS == 1
-    #include <ESP32-Chimera-Core.h>
+    #include <M5Unified.h>
     #include "BLE_M5GREY/ScreenSecurityHandlerM5Buttons.h"
 #elif USING_M5GFX == 1
     #include "BLE_M5GFX/ScreenSecurityHandler.h"
@@ -98,7 +98,7 @@ class BMDCameraConnection
         #elif USING_M5_BUTTONS == 1
 
             // Defined in here as wouldn't link when in the cpp file and using the preprocessor directive
-            void initialise(M5Display* displayPtr, int screenWidth, int screenHeight) // Screen security pass key
+            void initialise(M5GFX* displayPtr, int screenWidth, int screenHeight) // Screen security pass key
             {
                 if(initialised)
                     return;

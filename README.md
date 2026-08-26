@@ -1,5 +1,5 @@
 # :movie_camera: Magic Pocket Control for ESP32 devices
-Blackmagic Design camera control on a LILYGO T-Display-S3, M5Stack M5CoreS3, M5Stack M5StickC Plus, Freenove ESP32-S3-WROOM, or (hopefully) any other ESP32 device.
+Blackmagic Design camera control on a LILYGO T-Display-S3, M5Stack M5CoreS3, M5Stack Core2, M5Stack M5StickC Plus, Freenove ESP32-S3-WROOM, or (hopefully) any other ESP32 device.
 
 Designed for the Pocket 4K, Pocket 6K/G2/Pro, USRA G2 4.6K, URSA 12K.
 
@@ -104,7 +104,7 @@ I found this device had all the necessary components needed to connect and inter
 - Cheap! ~$22USD (or $40AUD for us Aussies)
 
 # What ESP32 devices are support?
-Hopefully all of them are supported and I have a few that I'm developing for to check they work - LILYGO T-Display-S3, M5Stack M5CoreS3, M5Stack M5StickC Plus, Freenove ESP32-S3-WROOM.
+Hopefully all of them are supported and I have a few that I'm developing for to check they work - LILYGO T-Display-S3, M5Stack M5CoreS3, M5Stack Core2, M5Stack M5StickC Plus, Freenove ESP32-S3-WROOM.
 
 It would be great if you could let the community know what ESP32 device you have and whether it works and I'll update this note.
 
@@ -117,6 +117,7 @@ You will need the following:
     - If you want the touch-screen functionality try the LILYGO T-Display-S3 **Touch version** [Buy here, ~$22USD](https://www.lilygo.cc/products/t-display-s3?variant=42589373268149)
         - *Make sure to get the Touch version!*
     - You can also try the M5Stack M5CoreS3 which comes with an in-built battery [Buy here, ~60USD](https://shop.m5stack.com/products/m5stack-cores3-esp32s3-lotdevelopment-kit)
+    - Or the M5Stack Core2 which also comes with an in-built battery [Buy here, ~45USD](https://shop.m5stack.com/products/m5stack-core2-esp32-s3-development-kit)
 - Visual Studio Code (VS Code) [Free, download here](https://code.visualstudio.com/download)
 - The PlatformIO extension within VS Code (see below on how to configure PlatformIO for this device)
 - A Blackmagic Design camera (Pocket 4K/6K/6K G2/6K Pro, URSA 4.6K G2, URSA 12K)
