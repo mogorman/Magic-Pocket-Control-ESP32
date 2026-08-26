@@ -56,6 +56,13 @@ esp_err_t mini_i2c_set_timing(int freq);
 
 i2c_status_t mini_i2c_get_status();
 
+// Enable or disable the I2C peripheral's interrupt line. While disabled, the
+// interrupt handler (and any transfer it re-arms) cannot run, so a blocking
+// *_sync() call is guaranteed not to race an in-flight asynchronous transfer.
+// Use this to quiesce the bus before a one-shot blocking read/write that must
+// not be interleaved with the interrupt-driven sampling loop.
+void mini_i2c_set_intr_enabled(bool enabled);
+
 // Some IMUs need a longer gap after the STOP condition before the next
 // transaction; this doubles the stop-hold timing.
 esp_err_t mini_i2c_double_stop_timing();

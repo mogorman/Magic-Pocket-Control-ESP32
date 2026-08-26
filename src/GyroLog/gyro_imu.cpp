@@ -266,15 +266,21 @@ uint32_t gyro_imu_measure_odr(void) {
 
     // Measure the FIFO fill rate over a 1 s window.
     //
-    // We must stop the ISR-driven drain first: while s_running is true the I2C
-    // interrupt keeps emptying the FIFO, so it would never accumulate. Set
-    // s_running false to freeze the drain, reset the FIFO, wait 1 s (during
-    // which the sensor keeps appending at its ODR), then read the count.
-    //
-    // This is a one-shot diagnostic, so briefly stalling the drain is harmless;
-    // we restore s_running afterwards.
+    // The interrupt-driven sampling loop is running: the I2C ISR re-arms a new
+    // FIFO read on every interrupt. If we issued a blocking *_sync() read while
+    // that ISR is live, the two would race on the same command/FIFO registers
+    // and the sync call's busy-wait could spin forever (this is what hung
+    // setup() on the splash screen). So we first *quiesce* the bus:
+    //   * s_running = false        -> the ISR callback stops re-arming
+    //   * mini_i2c_set_intr_enabled(false) -> the ISR can't fire at all
+    // Then the FIFO is free to accumulate at the sensor's ODR for 1 s, and we
+    // read the count with the bus fully quiet. We re-enable the interrupt and
+    // restore s_running afterwards so normal sampling resumes.
     bool was_running = s_running;
     s_running = false;
+    mini_i2c_set_intr_enabled(false);
+
+    // Reset the FIFO so the 1 s window starts from an empty buffer.
     mini_i2c_write_reg_sync(MPU6886_ADDR, REG_USER_CONTROL, UC_FIFO_RESET);
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
@@ -294,8 +300,9 @@ uint32_t gyro_imu_measure_odr(void) {
     printf("[GYRO-ODR] FIFO count after 1s = %d  =>  measured ODR = %u Hz%s\n",
            count, odr, wrapped ? "  (FIFO wrapped; ODR > ~73 Hz, value is a floor)" : "");
 
-    // Reset the FIFO and resume the normal drain.
+    // Reset the FIFO, re-enable the interrupt, and resume the normal drain.
     mini_i2c_write_reg_sync(MPU6886_ADDR, REG_USER_CONTROL, UC_FIFO_RESET);
+    mini_i2c_set_intr_enabled(true);
     s_running = was_running;
 
     return odr;

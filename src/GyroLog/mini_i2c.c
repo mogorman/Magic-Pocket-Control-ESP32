@@ -131,6 +131,18 @@ esp_err_t mini_i2c_set_timing(int freq) {
     return ESP_OK;
 }
 
+void mini_i2c_set_intr_enabled(bool enabled) {
+    // Mask/unmask the whole I2C interrupt source at the interrupt-controller
+    // level. This is safe from task context (it is not the ISR itself) and
+    // guarantees the handler cannot fire while a blocking *_sync() call is in
+    // progress, so the two can never race on the command/FIFO registers.
+    if (enabled) {
+        esp_intr_enable(i2c_ctx.int_hndl);
+    } else {
+        esp_intr_disable(i2c_ctx.int_hndl);
+    }
+}
+
 esp_err_t mini_i2c_init(int i2c_num, int sda_pin, int scl_pin, int freq) {
     esp_err_t err;
     mini_i2c_port = i2c_num;
