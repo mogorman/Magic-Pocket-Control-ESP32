@@ -4366,6 +4366,11 @@ static void imuSdWriteTest()
   uint32_t samples = 0;
   uint32_t i2cFails = 0;
   bool heapFail = false;
+  // Bytes actually written to the file (header + every drained row). We track
+  // this ourselves because preAllocate() makes FatFile::fileSize() report the
+  // full pre-allocated size (14 MB) immediately, so fileSize() can't be used as
+  // a "how much have we written" stop condition.
+  uint64_t writtenBytes = strlen(header);
 
   Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
   for(;;)
@@ -4406,7 +4411,9 @@ static void imuSdWriteTest()
     if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
     {
       lastDrain = now;
-      ring.writeOut(ring.bytesUsed());
+      size_t used = ring.bytesUsed();
+      writtenBytes += used;
+      ring.writeOut(used);
     }
 
     // Once per second: check heap integrity + report progress.
@@ -4421,25 +4428,28 @@ static void imuSdWriteTest()
           (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
       }
-      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu  fileSize=%lu/%lu  heap=%s\n",
+      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu  written=%lu/%lu  heap=%s\n",
         (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
-        (unsigned long)ring.bytesUsed(), (unsigned long)file.fileSize(), (unsigned long)kTarget,
+        (unsigned long)ring.bytesUsed(), (unsigned long)writtenBytes, (unsigned long)kTarget,
         ok ? "OK" : "CORRUPT");
     }
 
-    // Stop once the file has reached the target size.
-    if(file.fileSize() >= kTarget)
+    // Stop once we've written the target number of bytes.
+    if(writtenBytes >= kTarget)
       break;
   }
 
   // Final drain + close (truncate the unused pre-allocated space, sync, close).
+  writtenBytes += ring.bytesUsed();
   ring.writeOut(ring.bytesUsed());
   file.truncate();
+  uint64_t finalSize = file.fileSize(); // real on-card size after truncate
   file.sync();
   file.close();
-  // Commit the directory entry to the card.
+  // Commit the directory entry to the card (unmount + remount).
   sd.end();
-  sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40)));
+  SPI.begin();
+  sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4)));
 
   uint32_t elapsedMs = (micros() - start) / 1000;
   bool finalOk = heap_caps_check_integrity_all(true);
@@ -4448,7 +4458,8 @@ static void imuSdWriteTest()
 
   Serial.printf("\nIMU SD WRITE TEST done: %lu samples in %lu ms, %lu i2c failures, heap %s\n",
     (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)i2cFails, heapFail ? "CORRUPT" : "OK");
-  Serial.printf("  file on card: %s\n", path);
+  Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
+    (unsigned long)writtenBytes, path, (unsigned long)finalSize);
   Serial.println(heapFail ? "=== IMU SD WRITE TEST: HEAP CORRUPTED (SdFat write path is the corruptor) ==="
                            : "=== IMU SD WRITE TEST: heap clean (SdFat 1 kHz write path is STABLE) ===");
 
