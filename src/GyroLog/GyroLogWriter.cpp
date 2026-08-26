@@ -341,6 +341,16 @@ void GyroLogWriter::syncVolume()
 {
     if(SD.cardSize() == 0)
         return; // not mounted
+
+    // [DIAG] Verify heap integrity right before the unmount/remount. The crash
+    // has been in the SD.begin() -> ff_memalloc here; if the heap is already
+    // corrupt before we get here, this prints the offending block so we know
+    // the corruption happened earlier (during the clip) rather than in the
+    // remount itself.
+    if(!heap_caps_check_integrity_all(true))
+        DEBUG_ERROR("[GYRO-DIAG] syncVolume(): heap ALREADY corrupt before SD remount (internal free=%lu, psram free=%lu)",
+            (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+
     SD.end();
     SD.begin(4);
 }
@@ -446,6 +456,21 @@ void GyroLogWriter::poll()
     if(now - _lastSampleMicros < 1000)
         return;
     _lastSampleMicros = now;
+
+    // [DIAG] Once per second while recording, verify the internal + PSRAM heap
+    // integrity. If the 1 kHz sampling/SD-write path is corrupting the heap,
+    // this catches it *during* the clip and prints the exact corrupt block,
+    // instead of only surfacing at the clip-end remount. multi_heap_check
+    // prints the offending address/capabilities on failure.
+    static uint32_t lastHeapCheck = 0;
+    if(now - lastHeapCheck >= 1000000)
+    {
+        lastHeapCheck = now;
+        bool ok = heap_caps_check_integrity_all(true);
+        if(!ok)
+            DEBUG_ERROR("[GYRO-DIAG] poll(): HEAP INTEGRITY FAIL at t=%lu ms (internal free=%lu, psram free=%lu)",
+                (unsigned long)_tMs, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+    }
 
     float gx, gy, gz, ax, ay, az;
     if(!readImu(&gx, &gy, &gz, &ax, &ay, &az))
