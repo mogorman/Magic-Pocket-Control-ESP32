@@ -396,12 +396,18 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
 #if !GYROLOG_DIAG_NO_SD_WRITE
-    // Open the GCSV with raw FatFs (bypassing the Arduino File/VFS layer, whose
-    // write path was corrupting the internal heap at 1 kHz). The card is
-    // mounted at "/sd", so the FatFs path is "/sd" + our path.
+    // Open the GCSV with raw FatFs, bypassing the Arduino File/VFS layer whose
+    // write path was corrupting the internal heap at 1 kHz. The SD volume is the
+    // first (and only) FatFs drive, addressed as "0:". We use a drive-letter
+    // path (not the "/sd" VFS mount point) so f_open talks to FatFs directly
+    // instead of going through the VFS.
     char ffPath[160];
-    snprintf(ffPath, sizeof(ffPath), "/sd%s", path);
-    _ffOpen = (f_open(&_ffFile, ffPath, FA_WRITE | FA_CREATE_ALWAYS) == FR_OK);
+    snprintf(ffPath, sizeof(ffPath), "0:%s", path);
+    FRESULT res = f_open(&_ffFile, ffPath, FA_WRITE | FA_CREATE_ALWAYS);
+    _ffOpen = (res == FR_OK);
+    if(!_ffOpen)
+        // FRESULT: 10=NOT_ENABLED 11=NO_FILE 12=NO_PATH 13=INVALID_NAME 14=INT_ERR
+        DEBUG_ERROR("[GYRO] f_open failed: res=%d path='%s'", (int)res, ffPath);
     if(!_ffOpen)
         return false;
 #endif
@@ -797,12 +803,11 @@ bool GyroLogWriter::end()
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = _tMs;
     {
-        // fsize isn't a member in this FatFs version; stat the (just closed)
-        // path to get the final size.
+        // Get the final file size by stat-ing the (just closed) file.
         FILINFO fi;
         memset(&fi, 0, sizeof(fi));
         char ffPath[160];
-        snprintf(ffPath, sizeof(ffPath), "/sd/%s.gcsv", _startedName.c_str());
+        snprintf(ffPath, sizeof(ffPath), "0:/%s.gcsv", _startedName.c_str());
         _summary.fileSizeBytes = (f_stat(ffPath, &fi) == FR_OK) ? (size_t)fi.fsize : 0;
     }
     _summary.totalBytes = SD.totalBytes();
