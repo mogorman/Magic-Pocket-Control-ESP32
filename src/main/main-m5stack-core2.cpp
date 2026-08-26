@@ -203,6 +203,24 @@ static std::string nextGyroClipName()
   return std::string(buf);
 }
 
+// Derive the video file extension from the camera's current codec (default
+// ".braw"). Used to build the "videofilename" field in the GCSV header.
+static std::string gyroVideoExtension(BMDCamera* cam)
+{
+  if(cam && cam->hasCodec())
+  {
+    switch(cam->getCodec().basicCodec)
+    {
+      case CCUPacketTypes::BasicCodec::ProRes: return "mov";
+      case CCUPacketTypes::BasicCodec::RAW:    return "raw";
+      case CCUPacketTypes::BasicCodec::DNxHD:  return "mxf";
+      case CCUPacketTypes::BasicCodec::BRAW:   return "braw";
+      default: return "braw";
+    }
+  }
+  return "braw";
+}
+
 // Display elements on the screen common to all pages
 void Screen_Common(int sideBarColour)
 {
@@ -4048,55 +4066,44 @@ void loop() {
       gyroCallbackRegistered = true;
       camera->setOnRecordingStateChanged([](bool recording)
       {
+        auto cam = BMDControlSystem::getInstance()->getCamera();
+
+        // The slate name the camera currently reports. The camera sends
+        // "Next Clip" as a placeholder (it has no real clip name yet), so we
+        // treat that as "no name".
+        std::string slate;
+        if(cam->hasSlateName())
+          slate = cam->getSlateName();
+        bool slateIsPlaceholder = (slate == "Next Clip" || slate == "next clip" || slate.empty());
+
         if(recording)
         {
-          auto cam = BMDControlSystem::getInstance()->getCamera();
-
-          // Choose the clip name: the camera's slate name if it has a *real*
-          // one, otherwise a generic "clip_NNNN" name. The camera sends
-          // "Next Clip" as a placeholder slate name (it has no real clip name
-          // yet), so we treat that as "no name" and use the generated one.
+          // Choose the .gcsv base name: the camera's slate name if it has a
+          // *real* one, otherwise a generic "clip_NNNN" name.
           std::string clipName;
-          if(cam->hasSlateName())
-          {
-            std::string slate = cam->getSlateName();
-            if(slate != "Next Clip" && slate != "next clip")
-              clipName = slate;
-          }
+          if(!slateIsPlaceholder)
+            clipName = slate;
           if(clipName.empty())
             clipName = nextGyroClipName();
-
-          // Choose the video extension from the codec (default .braw).
-          std::string ext = "braw";
-          if(cam->hasCodec())
-          {
-            switch(cam->getCodec().basicCodec)
-            {
-              case CCUPacketTypes::BasicCodec::ProRes: ext = "mov"; break;
-              case CCUPacketTypes::BasicCodec::RAW:    ext = "raw"; break;
-              case CCUPacketTypes::BasicCodec::DNxHD:  ext = "mxf"; break;
-              case CCUPacketTypes::BasicCodec::BRAW:   ext = "braw"; break;
-              default: ext = "braw"; break;
-            }
-          }
 
           // Turn the display off for the duration of the clip (the IMU is
           // being sampled and written to the SD card).
           tft.setBrightness(0);
 
-          gyroLog.begin(clipName, ext, cam->getTimecodeString());
+          gyroLog.begin(clipName, gyroVideoExtension(cam.get()), cam->getTimecodeString());
         }
         else
         {
-          auto cam = BMDControlSystem::getInstance()->getCamera();
-
-          // If a real slate name arrived after we started with a generic name,
-          // rename the in-progress file before finalising.
-          if(cam->hasSlateName())
+          // The slate name the camera reports *now* (at the moment recording
+          // stopped) is the best name we have for the clip that was just
+          // recorded. If it's a real name, use it for both the .gcsv file and
+          // the "videofilename" field in the header (this is the "previous
+          // clip" the user referred to: the slate that was on screen while
+          // the clip was being recorded).
+          if(!slateIsPlaceholder)
           {
-            std::string slate = cam->getSlateName();
-            if(slate != "Next Clip" && slate != "next clip")
-              gyroLog.maybeRenameFromSlate(slate, "braw");
+            gyroLog.maybeRenameFromSlate(slate, gyroVideoExtension(cam.get()));
+            gyroLog.setVideoFileName(slate + "." + gyroVideoExtension(cam.get()));
           }
 
           // Capture the timecode at the moment recording stopped.

@@ -76,6 +76,13 @@ public:
     // (call just before end()).
     void setTimecodeAtEnd(const std::string& timecode) { _summary.timecodeAtEnd = timecode; }
 
+    // Update the "videofilename" field in the GCSV header (and the video file
+    // name in the summary) to a better name than the one we started with. This
+    // is used to correct the video file name when the camera's slate name
+    // arrives after recording has already started (e.g. the previous clip's
+    // slate, which is the clip actually being recorded). Call while recording.
+    void setVideoFileName(const std::string& videoFileName);
+
     State state() const { return _state; }
     bool isRecording() const { return _state == State::Recording; }
 
@@ -112,6 +119,11 @@ private:
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
     std::string _extension;
+
+    // The video file name to record in the GCSV "videofilename" field. Defaults
+    // to "<startedName>.<extension>" but can be updated mid-recording (see
+    // setVideoFileName) when a better name becomes available.
+    std::string _videoFileName;
 
     // Whether we have already renamed from a generic name to a slate name.
     bool _renamedFromSlate = false;
