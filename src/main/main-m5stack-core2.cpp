@@ -4384,6 +4384,13 @@ static void imuSdWriteTest()
   // full pre-allocated size (14 MB) immediately, so fileSize() can't be used as
   // a "how much have we written" stop condition.
   uint64_t writtenBytes = strlen(header);
+  // Drop-rate diagnostics. At 1 kHz we expect exactly 1 sample per ms, so the
+  // "expected" sample count is the elapsed time in ms. Comparing actual vs
+  // expected tells us whether we're capturing a constant 1 kHz rate or missing
+  // frames. We also track the largest gap between consecutive samples (a gap
+  // well over 1 ms means the loop was stalled, not that the sensor dropped).
+  uint32_t lastSampleTime = 0;   // micros() of the previous sample (for gap tracking)
+  uint32_t maxGapUs = 0;         // largest inter-sample gap seen so far
 
   Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
   for(;;)
@@ -4419,6 +4426,17 @@ static void imuSdWriteTest()
     ring.write((const uint8_t*)row, (size_t)n);
     samples++;
 
+    // Track the gap since the previous sample. At a true 1 kHz rate this is
+    // ~1000 us; a much larger value means the loop was stalled (not that the
+    // sensor dropped data).
+    if(lastSampleTime)
+    {
+      uint32_t gap = now - lastSampleTime;
+      if(gap > maxGapUs)
+        maxGapUs = gap;
+    }
+    lastSampleTime = now;
+
     // Drain the ring to the file at most once per 50 ms (20 Hz), same as the
     // logger.
     if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
@@ -4441,8 +4459,15 @@ static void imuSdWriteTest()
           (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
       }
-      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu  written=%lu/%lu  heap=%s\n",
-        (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+      // Capture rate: at 1 kHz we expect (elapsed ms) samples so far. Compare
+      // actual vs expected to see if we're holding a constant 1 kHz or missing
+      // frames. Also report the largest inter-sample gap seen so far.
+      uint32_t elapsedMs = (now - start) / 1000;
+      uint32_t expected = elapsedMs; // 1 sample per ms at 1 kHz
+      uint32_t pct = expected ? (samples * 100) / expected : 0;
+      Serial.printf("  t=%lu ms  samples=%lu (expect %lu, %lu%%)  i2cFails=%lu  maxGap=%lu us  ring=%lu  written=%lu/%lu  heap=%s\n",
+        (unsigned long)elapsedMs, (unsigned long)samples, (unsigned long)expected, (unsigned long)pct,
+        (unsigned long)i2cFails, (unsigned long)maxGapUs,
         (unsigned long)ring.bytesUsed(), (unsigned long)writtenBytes, (unsigned long)kTarget,
         ok ? "OK" : "CORRUPT");
     }
@@ -4475,10 +4500,21 @@ static void imuSdWriteTest()
   if(!finalOk && !heapFail)
     heapFail = true;
 
-  Serial.printf("\nIMU SD WRITE TEST done: %lu samples in %lu ms, %lu i2c failures, heap %s\n",
-    (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)i2cFails, heapFail ? "CORRUPT" : "OK");
+  // Overall capture rate: at 1 kHz we expect elapsedMs samples. If this is
+  // well under 100%, we are missing frames -- and maxGapUs tells us whether it
+  // was I2C failures (i2cFails high) or the loop being stalled (maxGap large).
+  uint32_t expectedTotal = elapsedMs;
+  uint32_t pctTotal = expectedTotal ? (samples * 100) / expectedTotal : 0;
+
+  Serial.printf("\nIMU SD WRITE TEST done: %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
+    (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
+    (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
+  if(pctTotal < 95 && i2cFails == 0)
+    Serial.println("  -> NOT a constant 1 kHz rate, but no I2C failures: the loop was STALLED (something else on the loop task blocked the sampler).");
+  else if(i2cFails > 0)
+    Serial.println("  -> I2C read failures present: the sensor reads themselves are failing (bus/timing).");
   Serial.println(heapFail ? "=== IMU SD WRITE TEST: HEAP CORRUPTED (SdFat write path is the corruptor) ==="
                            : "=== IMU SD WRITE TEST: heap clean (SdFat 1 kHz write path is STABLE) ===");
 
