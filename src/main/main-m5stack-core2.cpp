@@ -4025,9 +4025,141 @@ void Screen_GyroLog(bool forceRefresh = false)
   sprite->pushSprite(0, 0);
 }
 
+// [DIAG] Standalone SD-card stress test, independent of the gyro/GCSV path.
+// Writes 4096-byte chunks of a known pattern to a test file until 14 MB is
+// written, then reads it all back and verifies every byte. This isolates the
+// SD card / SPI / FatFs write path from the IMU sampling so we can tell whether
+// the heap corruption we saw is a property of the SD write itself (and thus
+// reproducible without any gyro data) or only appears under the full 1 kHz
+// sampling + write load. Set SD_STRESS_TEST to 1 to run it at boot.
+#ifndef SD_STRESS_TEST
+#define SD_STRESS_TEST 1
+#endif
+
+#if SD_STRESS_TEST
+static void sdStressTest()
+{
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== SD STRESS TEST: 4096-byte chunks to 14 MB ===");
+
+  const size_t kChunk = 4096;
+  const size_t kTotal = 14UL * 1024 * 1024; // 14 MB
+  const char* path = "/sd/sdtest.bin";
+
+  if(!SD.begin(4))
+  {
+    Serial.println("SD.begin(4) FAILED");
+    for(;;) delay(1000);
+  }
+  Serial.printf("SD mounted. cardSize=%lu bytes\n", (unsigned long)SD.cardSize());
+
+  // A 4096-byte pattern buffer with a distinct value per byte position so any
+  // misalignment/overwrite is visible on read-back.
+  static uint8_t pattern[4096];
+  for(size_t i = 0; i < kChunk; i++)
+    pattern[i] = (uint8_t)(i * 7 + 1);
+
+  // ---- WRITE PHASE ----
+  File f = SD.open(path, FILE_WRITE);
+  if(!f)
+  {
+    Serial.println("open for write FAILED");
+    for(;;) delay(1000);
+  }
+
+  unsigned long t0 = millis();
+  size_t written = 0;
+  size_t chunkNo = 0;
+  while(written < kTotal)
+  {
+    size_t thisLen = kTotal - written;
+    if(thisLen > kChunk) thisLen = kChunk;
+    f.write(pattern, thisLen);
+    written += thisLen;
+    chunkNo++;
+    // Log progress every 1 MB.
+    if((written & (1024 * 1024 - 1)) == 0)
+      Serial.printf("  wrote %lu MB (chunk %lu)\n", (unsigned long)(written >> 20), (unsigned long)chunkNo);
+  }
+  unsigned long tWrite = millis() - t0;
+  f.close();
+  unsigned long kbps = (tWrite >= 1000) ? (unsigned long)((written / 1024) / (tWrite / 1000)) : 0;
+  Serial.printf("WRITE done: %lu bytes in %lu ms (~%lu KB/s)\n",
+    (unsigned long)written, (unsigned long)tWrite, kbps);
+
+  // Force the directory entry + data to the card.
+  SD.end();
+  SD.begin(4);
+
+  // ---- VERIFY PHASE: read it all back and check every byte ----
+  File r = SD.open(path, FILE_READ);
+  if(!r)
+  {
+    Serial.println("open for read FAILED");
+    for(;;) delay(1000);
+  }
+  size_t size = r.size();
+  Serial.printf("VERIFY: file size on card = %lu bytes\n", (unsigned long)size);
+
+  size_t pos = 0;
+  size_t errors = 0;
+  size_t checked = 0;
+  while(pos < size)
+  {
+    size_t thisLen = size - pos;
+    if(thisLen > kChunk) thisLen = kChunk;
+    uint8_t* buf = (uint8_t*)malloc(thisLen);
+    int n = r.read(buf, (int)thisLen);
+    if(n != (int)thisLen)
+    {
+      Serial.printf("  READ SHORT at %lu: got %d of %lu\n", (unsigned long)pos, n, (unsigned long)thisLen);
+      free(buf);
+      break;
+    }
+    // The file content is the pattern repeated; byte at absolute offset p
+    // should equal pattern[p % 4096].
+    for(size_t i = 0; i < thisLen; i++)
+    {
+      size_t absOff = pos + i;
+      uint8_t expect = pattern[absOff % kChunk];
+      if(buf[i] != expect)
+      {
+        if(errors < 10)
+          Serial.printf("  MISMATCH at %lu: got 0x%02x expect 0x%02x\n",
+            (unsigned long)absOff, buf[i], expect);
+        errors++;
+      }
+    }
+    checked += thisLen;
+    free(buf);
+    pos += thisLen;
+  }
+  r.close();
+
+  Serial.printf("VERIFY done: checked %lu bytes, %lu mismatches\n", (unsigned long)checked, (unsigned long)errors);
+  Serial.println(errors == 0 ? "=== SD STRESS TEST: PASS (data intact) ===" : "=== SD STRESS TEST: FAIL (data corrupted) ===");
+
+  // Clean up the test file.
+  SD.remove(path);
+
+  for(;;)
+  {
+    delay(1000);
+    Serial.println("idle (test complete)");
+  }
+}
+#endif // SD_STRESS_TEST
+
 void setup() {
 
   M5.begin();
+
+#if SD_STRESS_TEST
+  // Run the standalone SD stress test and never return to normal operation.
+  sdStressTest();
+  return;
+#endif
 
   // Bump the MPU6886 output data rate from M5Unified's default 500 Hz to
   // 1 kHz. M5Unified's MPU6886_Class::begin() leaves SMPLRT_DIV = 0x03
