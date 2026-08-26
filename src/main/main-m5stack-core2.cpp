@@ -4045,10 +4045,14 @@ static void sdStressTest()
 
   const size_t kChunk = 4096;
   const size_t kTotal = 14UL * 1024 * 1024; // 14 MB
-  const char* path = "/sd/sdtest.bin";
+  const char* path = "/sdtest.bin"; // SD mount point is "/", not "/sd"
 
-  // M5.begin() already mounted the SD card; do NOT re-mount it.
-  Serial.printf("SD cardSize=%lu bytes\n", (unsigned long)SD.cardSize());
+  if(!SD.begin(4))
+  {
+    Serial.println("SD.begin(4) FAILED");
+    for(;;) delay(1000);
+  }
+  Serial.printf("SD mounted. cardSize=%lu bytes\n", (unsigned long)SD.cardSize());
 
   // A 4096-byte pattern buffer with a distinct value per byte position so any
   // misalignment/overwrite is visible on read-back.
