@@ -2,6 +2,7 @@
 #include <SD.h>
 #include <M5Unified.h>
 #include <nvs.h>
+#include <esp_heap_caps.h> // heap_caps_free (the correct free for ps_malloc'd PSRAM)
 #include <math.h>
 #include <cstring>
 #include <time.h>
@@ -719,7 +720,12 @@ bool GyroLogWriter::end()
 
     if(_ring)
     {
-        vPortFree(_ring);
+        // _ring was allocated with ps_malloc (the SPIRAM/PSRAM heap), so it
+        // must be freed with heap_caps_free, NOT vPortFree. vPortFree frees from
+        // the internal DRAM heap; freeing a PSRAM pointer with it corrupts the
+        // internal heap's TLSF free list (assert "block must be free" / "free
+        // list cannot have a null entry" on the next malloc).
+        heap_caps_free(_ring);
         _ring = nullptr;
     }
 
