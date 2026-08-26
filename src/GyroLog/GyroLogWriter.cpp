@@ -561,6 +561,13 @@ void GyroLogWriter::poll()
         if(!ok)
             DEBUG_ERROR("[GYRO-DIAG] poll(): HEAP INTEGRITY FAIL at t=%lu ms (internal free=%lu, psram free=%lu)",
                 (unsigned long)_tMs, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+        // [DIAG] Report the loop task's stack high-water mark (bytes still free at
+        // its deepest point). A value near 0 means the 8/16 KB loop-task stack is
+        // overflowing, which corrupts the adjacent internal heap (the GCSV-into-
+        // heap symptom). poll() runs on the loop task, so this is its own HWM.
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        DEBUG_INFO("[GYRO-DIAG] poll(): loop stack HWM=%u bytes free (t=%lu ms)",
+            (unsigned)hwm, (unsigned long)_tMs);
     }
 
     float gx, gy, gz, ax, ay, az;

@@ -61,6 +61,15 @@ static LGFX_Sprite *sprite;
 // NVS (non-volatile storage) for persisting the gyro clip-name counter.
 #include "nvs.h"
 
+// The Arduino loop task runs the whole camera-control app AND, while a clip is
+// recording, the 1 kHz IMU sampling (GyroLogWriter::poll). The default 8 KB
+// loop-task stack is too small for that combined load: it overflows, and because
+// the task stack lives in internal DRAM, the overflow corrupts the adjacent
+// internal heap (the GCSV row/IMU buffers spill past the stack into heap). That
+// is the "GCSV bytes in internal heap" corruption. Bump the loop-task stack to
+// 16 KB so the sampling + UI + BLE/CCU handling all fit.
+SET_LOOP_TASK_STACK_SIZE(16384)
+
 // Lato font from Google Fonts
 // Agency FB font is free for commercial use, copied from Windows fonts
 // Rather than using font sizes, we use specific fonts for each size as it renders better on screen
