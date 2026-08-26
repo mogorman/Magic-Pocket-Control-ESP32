@@ -27,11 +27,7 @@
 #include <time.h>
 #include "Arduino_DebugUtils.h"
 
-// FatFs, for setting a file's modification time (f_utime). The SD library is
-// built on FatFs, so ff.h is on the include path.
-extern "C" {
-#include "ff.h"
-}
+// (ff.h / FatFs is included via GyroLogWriter.h, which we include above.)
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -409,15 +405,26 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    _file = SD.open(path, FILE_WRITE);
+    // Open the GCSV file directly through FatFs (not the Arduino File / C stdio
+    // layer). The SD volume is mounted at "/sd", so the FatFs path is
+    // "/sd/<name>.gcsv". f_open with FA_CREATE_ALWAYS|FA_WRITE creates/truncates.
+    char fatfsPath[160];
+    snprintf(fatfsPath, sizeof(fatfsPath), "/sd%s", path);
+    _file = (FIL*)heap_caps_malloc(sizeof(FIL), MALLOC_CAP_INTERNAL);
     if(!_file)
         return false;
-    // [DIAG] Is the heap already corrupt right after the VFS open (before any
-    // write)? If yes, the open is the corruptor; if clean, the write is.
+    if(f_open(_file, fatfsPath, FA_CREATE_ALWAYS | FA_WRITE) != FR_OK)
+    {
+        DEBUG_INFO("[GYRO-DIAG] begin(): f_open FAILED for '%s'", fatfsPath);
+        heap_caps_free(_file);
+        _file = nullptr;
+        return false;
+    }
+    // [DIAG] Is the heap already corrupt right after the open (before any write)?
     if(!heap_caps_check_integrity_all(true))
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap ALREADY corrupt right after SD.open");
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap ALREADY corrupt right after f_open");
     else
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK right after SD.open");
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK right after f_open");
 #endif
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
@@ -468,18 +475,19 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         kGscale,
         kAscale);
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    _file.write((const uint8_t*)header, n);
-    // [DIAG] Is the heap corrupt after the first File::write (the header)?
+    UINT hw = 0;
+    f_write(_file, header, (size_t)n, &hw);
+    // [DIAG] Is the heap corrupt after the first write (the header)?
     if(!heap_caps_check_integrity_all(true))
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap corrupt after header File::write");
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap corrupt after header f_write");
     else
-        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK after header File::write");
+        DEBUG_INFO("[GYRO-DIAG] begin(): heap OK after header f_write");
 #endif
 
     if(!allocRing())
     {
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        _file.close();
+        closeFile();
 #endif
         return false;
     }
@@ -499,7 +507,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         heap_caps_free(_ring);
         _ring = nullptr;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        _file.close();
+        closeFile();
 #endif
         return false;
     }
@@ -513,7 +521,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         heap_caps_free(_ring);
         _ring = nullptr;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-        _file.close();
+        closeFile();
 #endif
         return false;
     }
@@ -681,8 +689,9 @@ void GyroLogWriter::drainRing()
         if(n == 0)
             break; // ring empty
 
-        // Write the stable internal buffer to the file.
-        _file.write(s_chunk, n);
+        // Write the stable internal buffer to the file, straight through FatFs.
+        UINT w = 0;
+        f_write(_file, s_chunk, n, &w);
     }
 
     // [DIAG] Log what this drain removed.
@@ -763,9 +772,29 @@ void GyroLogWriter::writerTask()
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     if(_file)
     {
-        _file.flush();
-        _file.close();
+        // Record the final size. In this FatFs (R0.14+) the current read/write
+        // position is FIL.fptr (FSIZE_t); for a file we've only been writing to,
+        // that equals the total bytes written. Capture it before we free the
+        // handle.
+        _finalFileSizeBytes = (uint64_t)_file->fptr;
+        // f_close flushes FatFs's own buffers and closes the file. Then commit
+        // the directory entry to the card.
+        f_close(_file);
+        heap_caps_free(_file);
+        _file = nullptr;
         syncVolume();
+    }
+#endif
+}
+
+void GyroLogWriter::closeFile()
+{
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
+    if(_file)
+    {
+        f_close(_file);
+        heap_caps_free(_file);
+        _file = nullptr;
     }
 #endif
 }
@@ -778,6 +807,11 @@ bool GyroLogWriter::startWriterTask()
     // writer can preempt to flush, but it is not high enough to starve the
     // I2C sampling.
     TaskHandle_t handle = nullptr;
+    // Pin the writer to core 1, away from the Arduino loop task (core 0) that
+    // does the 1 kHz I2C sampling. Now that the data path writes straight through
+    // FatFs (no newlib stdio FILE buffer), the two tasks no longer share the
+    // corrupting state, so keeping them on separate cores just avoids the writer
+    // preempting the sampling task.
     BaseType_t ok = xTaskCreatePinnedToCore(
         writerTaskTrampoline,
         "gyrolog_sd",
@@ -785,7 +819,7 @@ bool GyroLogWriter::startWriterTask()
         this,
         2,
         &handle,
-        1); // pin to core 1 (the app core), away from the loop task on core 0
+        1);
     if(ok != pdPASS)
         return false;
     _writerTask = handle;
@@ -1016,15 +1050,14 @@ bool GyroLogWriter::end()
     // separate task that has been doing nothing but SD work.
     stopWriterTask();
 
-    // Capture the summary. The file was closed by the writer task; the size is
-    // read from the (now closed) File handle, which still reports the last
-    // known size.
+    // Capture the summary. The file was closed by the writer task, so the size
+    // is the value we recorded just before closing (_finalFileSizeBytes).
     _summary.valid = true;
     _summary.fileName = _startedName + ".gcsv";
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = _tMs;
 #if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
-    _summary.fileSizeBytes = _file.size();
+    _summary.fileSizeBytes = _finalFileSizeBytes;
     _summary.totalBytes = SD.totalBytes();
     _summary.freeBytes = SD.totalBytes() - SD.usedBytes();
 #endif

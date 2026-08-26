@@ -6,6 +6,14 @@
 #include <cstdint>
 #include "FS.h" // for File / SD
 
+// FatFs, for the raw FIL handle we write the GCSV data through (bypassing the
+// Arduino File / C stdio FILE* layer, which corrupted the internal heap when
+// exercised during 1 kHz I2C sampling). The SD library is built on FatFs, so
+// ff.h is on the include path.
+extern "C" {
+#include "ff.h"
+}
+
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
 // Records the onboard MPU6886 gyro + accelerometer while a clip is being
@@ -127,8 +135,13 @@ public:
 private:
     State _state = State::Idle;
 
-    // The file we are writing (only valid while recording/finalizing).
-    File _file;
+    // The GCSV file we are writing, as a raw FatFs handle. We deliberately do
+    // NOT use the Arduino File / C stdio FILE* (fwrite) path for the data: that
+    // newlib-stdio buffering layer, exercised during 1 kHz I2C sampling, was
+    // overflowing an internal-heap buffer (GCSV bytes landing in DRAM). Writing
+    // straight through FatFs (f_open/f_write/f_close) skips the newlib FILE
+    // buffer entirely and goes directly to the SD diskio layer.
+    FIL* _file = nullptr;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
@@ -149,6 +162,10 @@ private:
     // header timestamp and the file's FAT modification time.
     long _timestampEpoch = 0;
     std::string _gcsvPath;
+
+    // The final on-card size of the .gcsv file, captured just before the writer
+    // task closes it (the FIL handle is then freed, so we can't query it after).
+    uint64_t _finalFileSizeBytes = 0;
 
     // Timing: t is the elapsed ms since the clip started (real, micros-based so
     // it stays accurate even if a sample is dropped).
@@ -205,6 +222,9 @@ private:
     // Drain as much of the ring buffer as possible to the file. Called by the
     // writer task (and once more from end() to flush the tail).
     void drainRing();
+
+    // Close the FatFs file handle and free it. Safe to call when _file is null.
+    void closeFile();
 
     // The dedicated SD writer task body. Waits on _dataSem, then drains the
     // ring to the file. Runs on its own FreeRTOS task so the C stdio / SD
