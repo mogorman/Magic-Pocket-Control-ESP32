@@ -5,6 +5,7 @@
 #include <math.h>
 #include <cstring>
 #include <time.h>
+#include "Arduino_DebugUtils.h"
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -443,59 +444,51 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     snprintf(oldPath, sizeof(oldPath), "/%s.gcsv", _startedName.c_str());
     snprintf(newPath, sizeof(newPath), "/%s.gcsv", name.c_str());
 
-    // The file was already closed by end(). We deliberately do NOT use
-    // SD.rename() here: on this FatFs build (FF_USE_LFN=2, stack LFN) the
-    // rename of a long-named file can leave the new entry with a zero data
-    // length, i.e. an empty file. Instead we copy the bytes to the new name
-    // and delete the old file, which is robust against that bug.
-    //
-    // Safety: we only delete the original once we have verified the copy has
-    // the same size, so a failed/short copy can never lose the data.
-    bool copied = false;
+    // The file was already closed by end(). Move it to the real clip name with
+    // SD.rename() (a FatFs f_rename). We log the size before and after the
+    // rename so we can see on the serial monitor exactly where the data is
+    // lost if the rename misbehaves with long (LFN) names.
+    bool renamed = false;
     if(std::strcmp(oldPath, newPath) != 0)
     {
-        File src = SD.open(oldPath, FILE_READ);
-        if(src)
+        // Size of the source file before the rename.
+        size_t beforeSize = 0;
         {
-            size_t srcSize = src.size();
-            File dst = SD.open(newPath, FILE_WRITE);
-            if(dst)
+            File chk = SD.open(oldPath, FILE_READ);
+            if(chk)
             {
-                uint8_t buf[1024];
-                size_t r;
-                while((r = src.read(buf, sizeof(buf))) > 0)
-                    dst.write(buf, r);
-                dst.flush();
-                dst.close();
-
-                // Verify the copy actually holds all the bytes before we dare
-                // delete the original.
-                File chk = SD.open(newPath, FILE_READ);
-                if(chk)
-                {
-                    copied = (chk.size() == srcSize);
-                    chk.close();
-                }
+                beforeSize = chk.size();
+                chk.close();
             }
-            src.close();
         }
+        DEBUG_INFO("[GYRO-RENAME] before: '%s' size=%u", oldPath, (unsigned)beforeSize);
+
+        renamed = SD.rename(oldPath, newPath);
+
+        // Size of the destination file after the rename.
+        size_t afterSize = 0;
+        bool afterExists = false;
+        {
+            File chk = SD.open(newPath, FILE_READ);
+            if(chk)
+            {
+                afterExists = true;
+                afterSize = chk.size();
+                chk.close();
+            }
+        }
+        DEBUG_INFO("[GYRO-RENAME] rename ok=%d  after: '%s' exists=%d size=%u",
+                   (int)renamed, newPath, (int)afterExists, (unsigned)afterSize);
     }
 
-    // If the copy failed (e.g. no free space) keep the original file and just
-    // fix its header; the log is still valid, just under the generic name.
-    const char* finalPath = copied ? newPath : oldPath;
-
-    // Update the "videofilename" header line in the (possibly copied) file.
+    // Update the "videofilename" header line in the (possibly renamed) file.
+    const char* finalPath = renamed ? newPath : oldPath;
     File f = SD.open(finalPath, FILE_WRITE);
     if(f)
     {
         rewriteVideoFileNameLine(f, name + "." + extension);
         f.close();
     }
-
-    // Remove the old file only once the verified copy is in place.
-    if(copied)
-        SD.remove(oldPath);
 
     // Reflect the new names in the summary shown on the Gyro Log screen.
     _startedName = name;
