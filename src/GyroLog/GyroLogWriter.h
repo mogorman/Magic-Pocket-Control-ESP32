@@ -6,14 +6,6 @@
 #include <cstdint>
 #include "FS.h" // for File / SD
 
-// FatFs, for the raw FIL handle we write the GCSV data through (bypassing the
-// Arduino File / C stdio FILE* layer, which corrupted the internal heap when
-// exercised during 1 kHz I2C sampling). The SD library is built on FatFs, so
-// ff.h is on the include path.
-extern "C" {
-#include "ff.h"
-}
-
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
 // Records the onboard MPU6886 gyro + accelerometer while a clip is being
@@ -135,13 +127,13 @@ public:
 private:
     State _state = State::Idle;
 
-    // The GCSV file we are writing, as a raw FatFs handle. We deliberately do
-    // NOT use the Arduino File / C stdio FILE* (fwrite) path for the data: that
-    // newlib-stdio buffering layer, exercised during 1 kHz I2C sampling, was
-    // overflowing an internal-heap buffer (GCSV bytes landing in DRAM). Writing
-    // straight through FatFs (f_open/f_write/f_close) skips the newlib FILE
-    // buffer entirely and goes directly to the SD diskio layer.
-    FIL* _file = nullptr;
+    // The GCSV file we are writing. We use the Arduino File (which goes through
+    // the ESP32 VFS -> FatFs with the VFS's own locking) rather than calling
+    // FatFs f_open/f_write directly: a direct f_open on the "0:" drive bypasses
+    // the VFS and corrupts the shared FATFS state. The data is written in small
+    // chunks from a dedicated writer task (see GyroLogWriter::writerTask) so the
+    // 1 kHz I2C sampling on the loop task never does SD work itself.
+    File _file;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
