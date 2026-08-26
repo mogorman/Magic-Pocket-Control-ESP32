@@ -4033,7 +4033,7 @@ void Screen_GyroLog(bool forceRefresh = false)
 // reproducible without any gyro data) or only appears under the full 1 kHz
 // sampling + write load. Set SD_STRESS_TEST to 1 to run it at boot.
 #ifndef SD_STRESS_TEST
-#define SD_STRESS_TEST 1
+#define SD_STRESS_TEST 0
 #endif
 
 #if SD_STRESS_TEST
@@ -4148,6 +4148,131 @@ static void sdStressTest()
 }
 #endif // SD_STRESS_TEST
 
+// [DIAG] Standalone 1 kHz IMU-sampling test, NO SD at all.
+//
+// The SD stress test proved the SD card / SPI / FatFs write path is clean.
+// This test isolates the OTHER half of the load: the 1 kHz IMU sampling. It
+// reads the MPU6886 over I2C at 1 kHz (exactly what GyroLogWriter::poll() does)
+// into a PSRAM ring for ~30 s, with NO SD mount, NO file, NO write, and checks
+// the heap integrity throughout. If the heap corrupts here, the I2C read path
+// (or the 1 kHz sampling loop) is the corruptor. If it stays clean, the
+// corruption is specifically the CONCURRENT combination of 1 kHz I2C reads + SD
+// writes (a real concurrency/timing bug), not either one alone.
+//
+// Set IMU_SAMPLE_TEST to 1 to run it at boot.
+#ifndef IMU_SAMPLE_TEST
+#define IMU_SAMPLE_TEST 1
+#endif
+
+#if IMU_SAMPLE_TEST
+static void imuSampleTest()
+{
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n=== IMU 1 kHz SAMPLING TEST (no SD) ===");
+
+  // Bump the ODR to 1 kHz, exactly as the real logger does.
+  M5.In_I2C.writeRegister8(0x68, 0x19, 0x00, 400000); // SMPLRT_DIV = 0 -> 1 kHz
+
+  // A PSRAM ring, same size as the logger's, to hold the formatted rows.
+  const size_t kRingSize = 64 * 1024;
+  char* ring = (char*)ps_malloc(kRingSize);
+  if(!ring)
+  {
+    Serial.println("ps_malloc FAILED");
+    for(;;) delay(1000);
+  }
+  size_t ringWrite = 0, ringRead = 0, ringCount = 0;
+
+  uint32_t start = micros();
+  uint32_t lastSample = start;
+  uint32_t lastHeapCheck = start;
+  uint32_t samples = 0;
+  uint32_t i2cFails = 0;
+  bool heapFail = false;
+  const uint32_t kDuration = 30000000; // 30 s
+
+  Serial.println("sampling at 1 kHz for 30 s, no SD...");
+  for(;;)
+  {
+    uint32_t now = micros();
+
+    // Stop after the duration.
+    if(now - start >= kDuration)
+      break;
+
+    // Sample at ~1 kHz (same gate as the logger).
+    if(now - lastSample < 1000)
+      continue;
+    lastSample = now;
+
+    // Read the IMU directly (14-byte burst at 400 kHz), as readImu() does.
+    uint8_t buf[14];
+    if(!M5.In_I2C.readRegister(0x68, 0x3B, buf, 14, 400000))
+    {
+      i2cFails++;
+      continue;
+    }
+    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
+    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
+    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
+    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
+    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
+    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
+
+    // Format a GCSV-style row and append to the ring (drop if full, as the
+    // logger does). This exercises the same per-sample work the logger does.
+    char row[64];
+    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+      (unsigned long)((now - start) / 1000),
+      (long)rawGx, (long)rawGy, (long)rawGz,
+      (long)rawAx, (long)rawAy, (long)rawAz);
+    if(ringCount + (size_t)n <= kRingSize)
+    {
+      memcpy(ring + ringWrite, row, (size_t)n);
+      ringWrite = (ringWrite + n) % kRingSize;
+      ringCount += (size_t)n;
+    }
+    samples++;
+
+    // Once per second: check heap integrity + report progress.
+    if(now - lastHeapCheck >= 1000000)
+    {
+      lastHeapCheck = now;
+      bool ok = heap_caps_check_integrity_all(true);
+      if(!ok && !heapFail)
+      {
+        heapFail = true;
+        Serial.printf("!! HEAP INTEGRITY FAIL at t=%lu ms (samples=%lu, i2cFails=%lu, internal free=%lu, psram free=%lu)\n",
+          (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+          (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+      }
+      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu/%lu  heap=%s\n",
+        (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+        (unsigned long)ringCount, (unsigned long)kRingSize, ok ? "OK" : "CORRUPT");
+    }
+  }
+
+  // Final heap check.
+  bool finalOk = heap_caps_check_integrity_all(true);
+  if(!finalOk && !heapFail)
+    heapFail = true;
+
+  heap_caps_free(ring);
+
+  Serial.printf("\nIMU SAMPLE TEST done: %lu samples in 30 s, %lu i2c failures, heap %s\n",
+    (unsigned long)samples, (unsigned long)i2cFails, heapFail ? "CORRUPT" : "OK");
+  Serial.println(heapFail ? "=== IMU SAMPLE TEST: HEAP CORRUPTED (I2C/sampling is the corruptor) ==="
+                          : "=== IMU SAMPLE TEST: heap clean (1 kHz sampling alone is NOT the corruptor) ===");
+
+  for(;;)
+  {
+    delay(1000);
+    Serial.println("idle (test complete)");
+  }
+}
+#endif // IMU_SAMPLE_TEST
+
 void setup() {
 
   M5.begin();
@@ -4155,6 +4280,12 @@ void setup() {
 #if SD_STRESS_TEST
   // Run the standalone SD stress test and never return to normal operation.
   sdStressTest();
+  return;
+#endif
+
+#if IMU_SAMPLE_TEST
+  // Run the standalone 1 kHz IMU-sampling test (no SD) and never return.
+  imuSampleTest();
   return;
 #endif
 
