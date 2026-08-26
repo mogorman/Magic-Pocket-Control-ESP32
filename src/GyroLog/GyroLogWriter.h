@@ -6,6 +6,14 @@
 #include <cstdint>
 #include "FS.h" // for File / SD
 
+// FatFs, for writing the GCSV directly with f_open/f_write/f_close. We use
+// raw FatFs instead of the Arduino File/VFS layer because the VFS File::write
+// path was corrupting the internal heap at 1 kHz (see the GyroLogWriter.cpp
+// notes). ff.h is on the include path because the SD library is built on it.
+extern "C" {
+#include "ff.h"
+}
+
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
 // Records the onboard MPU6886 gyro + accelerometer while a clip is being
@@ -127,8 +135,12 @@ public:
 private:
     State _state = State::Idle;
 
-    // The file we are writing (only valid while recording/finalizing).
-    File _file;
+    // The GCSV file we are writing, opened with raw FatFs (f_open). We use
+    // FatFs directly rather than the Arduino File/VFS layer because the VFS
+    // File::write() path was corrupting the internal heap at 1 kHz. Only valid
+    // while recording/finalizing; _ffOpen tracks whether it is currently open.
+    FIL _ffFile;
+    bool _ffOpen = false;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
