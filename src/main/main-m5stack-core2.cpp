@@ -3888,8 +3888,6 @@ void Screen_GyroLog(bool forceRefresh = false)
     return;
   lastRefreshedScreen = camera->getLastModified();
 
-  DEBUG_DEBUG("Screen GyroLog Refreshed.");
-
   sprite->fillSprite(TFT_BLACK);
 
   Screen_Common_Connected(); // Common elements
