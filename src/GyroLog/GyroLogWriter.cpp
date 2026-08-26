@@ -443,19 +443,47 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
     snprintf(oldPath, sizeof(oldPath), "/%s.gcsv", _startedName.c_str());
     snprintf(newPath, sizeof(newPath), "/%s.gcsv", name.c_str());
 
-    // The file was already closed by end(), so renaming it here cannot
-    // interrupt the (now finished) sample stream.
-    bool renamed = false;
+    // The file was already closed by end(). We deliberately do NOT use
+    // SD.rename() here: on this FatFs build (FF_USE_LFN=2, stack LFN) the
+    // rename of a long-named file can leave the new entry with a zero data
+    // length, i.e. an empty file. Instead we copy the bytes to the new name
+    // and delete the old file, which is robust against that bug.
+    bool copied = false;
     if(std::strcmp(oldPath, newPath) != 0)
-        renamed = SD.rename(oldPath, newPath);
+    {
+        File src = SD.open(oldPath, FILE_READ);
+        if(src)
+        {
+            File dst = SD.open(newPath, FILE_WRITE);
+            if(dst)
+            {
+                uint8_t buf[1024];
+                size_t r;
+                while((r = src.read(buf, sizeof(buf))) > 0)
+                    dst.write(buf, r);
+                dst.flush();
+                dst.close();
+                copied = true;
+            }
+            src.close();
+        }
+    }
 
-    // Update the "videofilename" header line in the (possibly renamed) file.
-    File f = SD.open(renamed ? newPath : oldPath, FILE_WRITE);
+    // If the copy failed (e.g. no free space) keep the original file and just
+    // fix its header; the log is still valid, just under the generic name.
+    const char* finalPath = copied ? newPath : oldPath;
+
+    // Update the "videofilename" header line in the (possibly copied) file.
+    File f = SD.open(finalPath, FILE_WRITE);
     if(f)
     {
         rewriteVideoFileNameLine(f, name + "." + extension);
         f.close();
     }
+
+    // Remove the old file now that the copy is in place.
+    if(copied)
+        SD.remove(oldPath);
 
     // Reflect the new names in the summary shown on the Gyro Log screen.
     _startedName = name;
