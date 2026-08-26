@@ -4305,8 +4305,16 @@ static void imuSdWriteTest()
   M5.In_I2C.writeRegister8(0x68, 0x19, 0x00, 400000); // SMPLRT_DIV = 0 -> 1 kHz
 
   // Mount the SD via SdFat (CS pin 4, shared SPI, 40 MHz) -- same as the logger.
+  //
+  // The Core2's SD card shares the VSPI bus with the M5GFX display. M5GFX/lgfx
+  // initializes that bus itself (spi_bus_initialize(VSPI)), so we tell SdFat NOT
+  // to re-begin the bus (USER_SPI_BEGIN) -- re-initializing an already-active
+  // SPI bus corrupts the MISO path and the card read times out (0xFF). We do
+  // a plain SPI.begin() ourselves first so the Arduino SPI object is up, then let
+  // SdFat only do beginTransaction/endTransaction on it.
+  SPI.begin();
   SdFat sd;
-  if(!sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40))))
+  if(!sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40))))
   {
     // Print the full SdFat error so we can see WHY the mount failed: the card
     // type (0 = not detected), the SD error code + data, and the volume fatType.

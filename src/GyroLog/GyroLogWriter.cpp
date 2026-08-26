@@ -294,7 +294,13 @@ bool GyroLogWriter::ensureSd()
         return true;
     }
 
-    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40))))
+    // The Core2's SD card shares the VSPI bus with the M5GFX display, which
+    // initializes that bus itself (spi_bus_initialize(VSPI)). Tell SdFat NOT to
+    // re-begin the bus (USER_SPI_BEGIN) -- re-initializing an already-active SPI
+    // bus corrupts the MISO path and the card read times out (0xFF). Bring the
+    // Arduino SPI object up first, then let SdFat only do begin/endTransaction.
+    SPI.begin();
+    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40))))
     {
         _sdReady = false;
         _sdStatusMessage = "mount failed (no card / not FAT?)";
@@ -329,7 +335,8 @@ void GyroLogWriter::syncVolume()
         return; // not mounted
 
     _sd.end();
-    _sd.begin(SdSpiConfig(4, SHARED_SPI, SD_SCK_MHZ(40)));
+    SPI.begin();
+    _sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(40)));
 }
 
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
