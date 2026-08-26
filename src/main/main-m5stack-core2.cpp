@@ -4291,7 +4291,7 @@ static void imuSampleTest()
 //
 // Set IMU_SD_WRITE_TEST to 1 to run it at boot.
 #ifndef IMU_SD_WRITE_TEST
-#define IMU_SD_WRITE_TEST 1
+#define IMU_SD_WRITE_TEST 0
 #endif
 
 #if IMU_SD_WRITE_TEST
