@@ -6,6 +6,15 @@
 #define GYROLOG_DIAG_NO_SD_WRITE 0
 #endif
 
+// [DIAG] Isolation toggle. When set, the SD card is MOUNTED (SD.begin) but no
+// file is opened or written during the clip -- only the 1 kHz IMU sampling
+// runs. If the heap stays clean, the corruption is from the file open/write
+// (not the mount); if it corrupts, merely mounting the SD + 1 kHz sampling is
+// the trigger.
+#ifndef GYROLOG_DIAG_MOUNT_ONLY
+#define GYROLOG_DIAG_MOUNT_ONLY 1
+#endif
+
 #include "GyroLogWriter.h"
 #include <SD.h>
 #include <M5Unified.h>
@@ -399,7 +408,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     char path[128];
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
-#if !GYROLOG_DIAG_NO_SD_WRITE
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     _file = SD.open(path, FILE_WRITE);
     if(!_file)
         return false;
@@ -452,13 +461,13 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         kTscale,
         kGscale,
         kAscale);
-#if !GYROLOG_DIAG_NO_SD_WRITE
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     _file.write((const uint8_t*)header, n);
 #endif
 
     if(!allocRing())
     {
-#if !GYROLOG_DIAG_NO_SD_WRITE
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
         _file.close();
 #endif
         return false;
@@ -788,7 +797,7 @@ bool GyroLogWriter::end()
 
     // Flush any remaining buffered samples.
     drainRing();
-#if !GYROLOG_DIAG_NO_SD_WRITE
+#if !GYROLOG_DIAG_NO_SD_WRITE && !GYROLOG_DIAG_MOUNT_ONLY
     _file.flush();
 
     // Capture the summary before closing.
