@@ -4321,5 +4321,20 @@ void loop() {
     }
   }
 
+  // [DEBUG] Prove the CCU request path works. Every ~10 seconds, while
+  // connected, send a known-good void command (AutoFocus) and log the result.
+  // This runs from the main loop (not the BLE notify handler), so if it does
+  // not crash, the earlier slate-query crash was a context problem, not a
+  // packet problem.
+  static unsigned long lastAutoFocusPing = 0;
+  if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected &&
+     currentTime - lastAutoFocusPing >= 10000)
+  {
+    lastAutoFocusPing = currentTime;
+    DEBUG_INFO("[PING] sending AutoFocus request to camera");
+    PacketWriter::writeAutoFocus(&cameraConnection);
+    DEBUG_INFO("[PING] AutoFocus request returned (no crash)");
+  }
+
   delay(5);
 }
