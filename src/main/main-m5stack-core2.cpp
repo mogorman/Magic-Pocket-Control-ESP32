@@ -4301,6 +4301,14 @@ static void imuSampleTest()
 #ifndef SD_TEST_PREALLOCATE
 #define SD_TEST_PREALLOCATE 0
 #endif
+// When 0, the drain DISCARDS the buffered rows instead of writing them to the
+// card. This isolates whether the SD write itself (FatFile::write) is what
+// stalls the 1 kHz sampler: if the capture rate jumps to ~100% with this off,
+// the SD write is the culprit; if it stays low, something else on the loop task
+// (display, BLE) is the cause.
+#ifndef SD_TEST_WRITE
+#define SD_TEST_WRITE 0
+#endif
 
 static void imuSdWriteTest()
 {
@@ -4438,7 +4446,10 @@ static void imuSdWriteTest()
     lastSampleTime = now;
 
     // Drain the ring to the file at most once per 50 ms (20 Hz), same as the
-    // logger.
+    // logger. With SD_TEST_WRITE=0 we do NOT write to the card at all (the ring
+    // just fills and drops), to isolate whether the SD write is what stalls the
+    // sampler.
+#if SD_TEST_WRITE
     if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
     {
       lastDrain = now;
@@ -4446,6 +4457,7 @@ static void imuSdWriteTest()
       writtenBytes += used;
       ring.writeOut(used);
     }
+#endif
 
     // Once per second: check heap integrity + report progress.
     if(now - lastHeapCheck >= 1000000)
@@ -4472,11 +4484,19 @@ static void imuSdWriteTest()
         ok ? "OK" : "CORRUPT");
     }
 
-    // Stop once we've written the target number of bytes.
+    // Stop once we've written the target number of bytes (or, when not writing
+    // to the card, after a fixed 15 s so we get a stable capture-rate reading).
+#if SD_TEST_WRITE
     if(writtenBytes >= kTarget)
       break;
+#else
+    if(now - start >= 15000000)
+      break;
+#endif
   }
 
+  uint64_t finalSize = 0;
+#if SD_TEST_WRITE
   // Final drain + close. If we pre-allocated, truncate() frees the unused
   // pre-allocated clusters and shrinks the file to the real written size; if we
   // didn't pre-allocate, the file is already the right size so we skip it.
@@ -4487,13 +4507,17 @@ static void imuSdWriteTest()
   file.truncate();
   Serial.printf("truncate() took %lu us\n", (unsigned long)(micros() - tTrunc));
 #endif
-  uint64_t finalSize = file.fileSize(); // real on-card size
+  finalSize = file.fileSize(); // real on-card size
   file.sync();
   file.close();
   // Commit the directory entry to the card (unmount + remount).
   sd.end();
   SPI.begin();
   sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4)));
+#else
+  // Not writing to the card: just close the (empty) file we opened.
+  file.close();
+#endif
 
   uint32_t elapsedMs = (micros() - start) / 1000;
   bool finalOk = heap_caps_check_integrity_all(true);
@@ -4506,11 +4530,13 @@ static void imuSdWriteTest()
   uint32_t expectedTotal = elapsedMs;
   uint32_t pctTotal = expectedTotal ? (samples * 100) / expectedTotal : 0;
 
-  Serial.printf("\nIMU SD WRITE TEST done: %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
-    (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
+  Serial.printf("\nIMU SD WRITE TEST done (write=%d): %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
+    SD_TEST_WRITE, (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
     (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
+#if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
+#endif
   if(pctTotal < 95 && i2cFails == 0)
     Serial.println("  -> NOT a constant 1 kHz rate, but no I2C failures: the loop was STALLED (something else on the loop task blocked the sampler).");
   else if(i2cFails > 0)
