@@ -4094,21 +4094,19 @@ void loop() {
         }
         else
         {
-          // The slate name the camera reports *now* (at the moment recording
-          // stopped) is the best name we have for the clip that was just
-          // recorded. If it's a real name, use it for both the .gcsv file and
-          // the "videofilename" field in the header (this is the "previous
-          // clip" the user referred to: the slate that was on screen while
-          // the clip was being recorded).
-          if(!slateIsPlaceholder)
-          {
-            gyroLog.maybeRenameFromSlate(slate, gyroVideoExtension(cam.get()));
-            gyroLog.setVideoFileName(slate + "." + gyroVideoExtension(cam.get()));
-          }
-
-          // Capture the timecode at the moment recording stopped.
+          // Capture the timecode at the moment recording stopped, then
+          // finalise the log (flush, close, populate the summary).
           gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
           gyroLog.end();
+
+          // The slate name the camera reports *now* (at the moment recording
+          // stopped) is the best name we have for the clip that was just
+          // recorded (the "previous" clip's slate). Apply it *after* the file
+          // has been finalised so the sample stream is never interrupted: this
+          // renames the .gcsv and updates the "videofilename" header line to
+          // match the real video file. No-op if the name is still the
+          // "Next Clip" placeholder.
+          gyroLog.applySlateName(slate, gyroVideoExtension(cam.get()));
 
           // Bring the display back on and force a refresh of the (now
           // summary) screen.

@@ -67,21 +67,20 @@ public:
     // summary. Returns true if a log was active and finalised.
     bool end();
 
-    // If we started with a generic name and a real slate name has since
-    // arrived, rename the in-progress file to match. Call periodically while
-    // recording (cheap no-op if nothing to do).
-    void maybeRenameFromSlate(const std::string& slateName, const std::string& extension);
-
     // Set the timecode string to record as the "end" timecode in the summary
     // (call just before end()).
     void setTimecodeAtEnd(const std::string& timecode) { _summary.timecodeAtEnd = timecode; }
 
-    // Update the "videofilename" field in the GCSV header (and the video file
-    // name in the summary) to a better name than the one we started with. This
-    // is used to correct the video file name when the camera's slate name
-    // arrives after recording has already started (e.g. the previous clip's
-    // slate, which is the clip actually being recorded). Call while recording.
-    void setVideoFileName(const std::string& videoFileName);
+    // Apply a real clip name to a *finalised* log. Call after end() with the
+    // slate name the camera reported (the "previous" clip's slate, i.e. the
+    // clip that was just recorded). This renames the .gcsv file and rewrites
+    // the "videofilename" header line so both match the real video file.
+    //
+    // It is deliberately done only after the file has been closed (in end()),
+    // never while the IMU is still being sampled, so the 1 kHz sample stream is
+    // never interrupted and no data can be lost to a mid-recording rename.
+    // No-op if the name is empty, a placeholder, or already the current name.
+    void applySlateName(const std::string& slateName, const std::string& extension);
 
     State state() const { return _state; }
     bool isRecording() const { return _state == State::Recording; }
@@ -121,12 +120,9 @@ private:
     std::string _extension;
 
     // The video file name to record in the GCSV "videofilename" field. Defaults
-    // to "<startedName>.<extension>" but can be updated mid-recording (see
-    // setVideoFileName) when a better name becomes available.
+    // to "<startedName>.<extension>" and is updated by applySlateName() after
+    // the file is finalised, when a real slate name becomes available.
     std::string _videoFileName;
-
-    // Whether we have already renamed from a generic name to a slate name.
-    bool _renamedFromSlate = false;
 
     // Timing: t is the elapsed ms since the clip started.
     uint32_t _tMs = 0;

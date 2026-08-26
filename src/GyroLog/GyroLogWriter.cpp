@@ -3,6 +3,7 @@
 #include <M5Unified.h>
 #include <nvs.h>
 #include <math.h>
+#include <cstring>
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -218,7 +219,6 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     if(_startedName.empty())
         _startedName = clipName; // shouldn't happen; caller handles the fallback
     _extension = extension;
-    _renamedFromSlate = false;
     _videoFileName = _startedName + "." + extension;
 
     char path[128];
@@ -332,74 +332,30 @@ void GyroLogWriter::drainRing()
     _file.flush();
 }
 
-void GyroLogWriter::maybeRenameFromSlate(const std::string& slateName, const std::string& extension)
+// Rewrite the "videofilename" line in a GCSV file's header. The header is a
+// fixed block of lines at the start of the file, so we seek to the beginning,
+// read it, replace the one line, and write it back; the data rows that follow
+// are untouched. Returns true if the line was found and rewritten.
+static bool rewriteVideoFileNameLine(File& file, const std::string& videoFileName)
 {
-    if(_state != State::Recording)
-        return;
-    if(_renamedFromSlate)
-        return;
-    if(slateName.empty())
-        return;
-    if(slateName == _startedName)
-        return; // already using this name
-
-    char oldPath[128];
-    char newPath[128];
-    snprintf(oldPath, sizeof(oldPath), "/%s.gcsv", _startedName.c_str());
-    snprintf(newPath, sizeof(newPath), "/%s.gcsv", slateName.c_str());
-
-    // Close, rename, reopen.
-    _file.close();
-    if(SD.rename(oldPath, newPath))
-    {
-        _file = SD.open(newPath, FILE_WRITE);
-        if(_file)
-        {
-            _startedName = slateName;
-            _extension = extension;
-            _videoFileName = slateName + "." + extension;
-            _renamedFromSlate = true;
-        }
-    }
-    else
-    {
-        // Reopen the old path so we keep logging.
-        _file = SD.open(oldPath, FILE_WRITE);
-    }
-}
-
-void GyroLogWriter::setVideoFileName(const std::string& videoFileName)
-{
-    if(_state != State::Recording)
-        return;
-    if(videoFileName.empty())
-        return;
-
-    // Rewrite the "videofilename" line in the GCSV header. The header is a
-    // fixed block of lines at the start of the file, so we seek back to the
-    // beginning, read it, replace the one line, and write it back. The data
-    // rows that follow are untouched.
-    if(!_file)
-        return;
-
-    _file.flush();
-    _file.seek(0);
+    file.flush();
+    file.seek(0);
 
     const size_t kMaxHeader = 1024;
     uint8_t raw[kMaxHeader];
-    size_t n = _file.read(raw, kMaxHeader);
+    size_t n = file.read(raw, kMaxHeader);
     if(n == 0)
-        return;
+        return false;
     char* buf = (char*)raw;
     buf[n] = '\0';
 
     // Find the "videofilename," line and replace it.
     char* lineStart = strstr(buf, "videofilename,");
     if(!lineStart)
-        return;
+        return false;
     char* lineEnd = strchr(lineStart, '\n');
     if(!lineEnd)
-        return;
+        return false;
 
     // Build the replacement line and the full new header. We cannot shrink the
     // file (the SD File API has no truncate), so if the new header is shorter
@@ -412,11 +368,51 @@ void GyroLogWriter::setVideoFileName(const std::string& videoFileName)
     header += newLine;
     header += std::string(lineEnd + 1, (size_t)(buf + n - (lineEnd + 1)));
 
-    _file.seek(0);
-    _file.write((const uint8_t*)header.data(), header.size());
-    _file.flush();
+    file.seek(0);
+    file.write((const uint8_t*)header.data(), header.size());
+    file.flush();
+    return true;
+}
 
-    _videoFileName = videoFileName;
+void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
+{
+    // Only meaningful right after a log has been finalised.
+    if(_state != State::Idle)
+        return;
+
+    // Sanitise the slate name; a placeholder ("Next Clip") or blank name comes
+    // back empty, in which case we keep the name we started with.
+    std::string name = sanitiseClipName(slateName);
+    if(name.empty())
+        return;
+    if(name == _startedName)
+        return; // already using this name
+
+    char oldPath[128];
+    char newPath[128];
+    snprintf(oldPath, sizeof(oldPath), "/%s.gcsv", _startedName.c_str());
+    snprintf(newPath, sizeof(newPath), "/%s.gcsv", name.c_str());
+
+    // The file was already closed by end(), so renaming it here cannot
+    // interrupt the (now finished) sample stream.
+    bool renamed = false;
+    if(std::strcmp(oldPath, newPath) != 0)
+        renamed = SD.rename(oldPath, newPath);
+
+    // Update the "videofilename" header line in the (possibly renamed) file.
+    File f = SD.open(renamed ? newPath : oldPath, FILE_WRITE);
+    if(f)
+    {
+        rewriteVideoFileNameLine(f, name + "." + extension);
+        f.close();
+    }
+
+    // Reflect the new names in the summary shown on the Gyro Log screen.
+    _startedName = name;
+    _extension = extension;
+    _videoFileName = name + "." + extension;
+    _summary.fileName = name + ".gcsv";
+    _summary.videoFileName = _videoFileName;
 }
 
 bool GyroLogWriter::end()
