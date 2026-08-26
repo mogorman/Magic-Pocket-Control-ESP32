@@ -560,6 +560,22 @@ void GyroLogWriter::poll()
     // Append to the ring buffer if there is room; otherwise drop (we never
     // block the 1 kHz cadence on a full buffer). This runs on the same task as
     // the drain, so no locking is needed.
+    //
+    // [DIAG] The crash is a wild-pointer fault in this memcpy. Log the ring
+    // pointer/index and a heap-integrity check once per second to see whether
+    // _ring/_ringWrite are already corrupt (=> something else overwrote the
+    // GyroLogWriter object / its heap) or whether the heap was corrupted by an
+    // earlier operation.
+    static uint32_t lastRingDiag = 0;
+    if(now - lastRingDiag >= 1000000)
+    {
+        lastRingDiag = now;
+        bool ok = heap_caps_check_integrity_all(true);
+        DEBUG_INFO("[GYRO-DIAG] ring: _ring=%p _ringWrite=%lu _ringCount=%lu _ringRead=%lu heap=%s obj=%p",
+            (void*)_ring, (unsigned long)_ringWrite, (unsigned long)_ringCount,
+            (unsigned long)_ringRead, ok ? "OK" : "CORRUPT", (void*)this);
+    }
+
     if(_ringCount < kRingSize && _ringCount + (size_t)n <= kRingSize)
     {
         memcpy(_ring + _ringWrite, row, (size_t)n);
