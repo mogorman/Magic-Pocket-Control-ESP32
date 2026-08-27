@@ -360,9 +360,11 @@ private:
     // out at ~50 KB/s). 1 MHz ("fast mode plus") gives ~2.5x headroom. The
     // M5Unified In_I2C bus is shared with other sensors, but they're only touched
     // on the main loop (core 1) and the FIFO drain runs on the sampler task
-    // (core 0), so a faster clock here doesn't disturb them. If the sensor
-    // misbehaves at 1 MHz (reads fail / garbage), drop this back to 400000.
-    static const uint32_t kImuI2cHz = 1000000;
+    // (core 0), so a faster clock here doesn't disturb them. The E2E clock sweep
+    // (400k-1.5M) showed 1.5 MHz gives the best capture with the fewest I2C read
+    // failures on this clone, so that's the default. (If a different board's
+    // sensor misbehaves at 1.5 MHz, drop this back to 1000000 or 400000.)
+    static const uint32_t kImuI2cHz = 1500000;
     // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
     // E2E test can override it via setI2cHz() to sweep for the best value.
     uint32_t _i2cHz = kImuI2cHz;

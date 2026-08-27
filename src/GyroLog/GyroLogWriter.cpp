@@ -707,10 +707,21 @@ uint32_t GyroLogWriter::drainFifoOnce()
     {
         size_t chunk = (size_t)fifoBytes; // exact buffered count, <= 1024
         uint32_t tRead = micros();
-        if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, i2cHz))
+        // The I2C read can fail sporadically (a bus glitch on the shared M5 I2C
+        // line, more frequent at faster clocks). m5gfx's readRegister is a single
+        // atomic I2C transaction: a failure is a bus error BEFORE data is
+        // transferred, so the FIFO still holds the same bytes and a retry
+        // re-reads them cleanly (no partial-consumption misalignment). Retry up to
+        // 3 times to recover the samples a single glitch would otherwise drop.
+        bool ok = false;
+        for(int attempt = 0; attempt < 3 && !ok; attempt++)
+        {
+            ok = M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, i2cHz);
+        }
+        if(!ok)
         {
             _i2cFailures++;
-            chunk = 0; // I2C read failed; nothing drained this pass
+            chunk = 0; // I2C read failed after retries; nothing drained this pass
         }
         dataUs = micros() - tRead;
 
