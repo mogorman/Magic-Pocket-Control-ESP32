@@ -10,6 +10,13 @@
 #include <time.h>
 #include "Arduino_DebugUtils.h"
 
+// [DIAG] When 1, the writer drains the ring (copyOut) but skips the actual SD
+// card write. Used to test whether the SD write is what degrades the 1 kHz I2C
+// sampling. Set back to 0 for normal operation.
+#ifndef GYRO_SKIP_SD_WRITE
+#define GYRO_SKIP_SD_WRITE 1
+#endif
+
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
 // A GCSV orientation token is a 3-character string. Each character is one of
@@ -973,8 +980,15 @@ void GyroLogWriter::drainRing()
     xSemaphoreGive(_ringMutex);
 
     // Phase 2: slow SD write of the copied bytes, WITHOUT the mutex.
+    // [DIAG] GYRO_SKIP_SD_WRITE=1 skips the actual card write (to test whether the
+    // SD write is what degrades the 1 kHz I2C sampling). Data is still drained from
+    // the ring (copied out) but not committed to the card.
+#if GYRO_SKIP_SD_WRITE
+    (void)copied;
+#else
     if(copied > 0)
         _file.write(s_scratch, copied);
+#endif
 }
 
 // The writer task's main loop. It waits (with a short timeout) for the sampler
