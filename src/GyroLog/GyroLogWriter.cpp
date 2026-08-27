@@ -562,6 +562,28 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 // task is not running (e.g. during the pre-recording calibration screen).
 uint32_t GyroLogWriter::drainFifoOnce()
 {
+    // [DIAG] Once per second, report WHO is calling drainFifoOnce() and how
+    // often. If BOTH the sampler task and the main loop are draining, they race
+    // on the I2C bus and the FIFO and each only gets ~half the packets. This
+    // tells us definitively which context(s) are draining.
+    {
+        static uint32_t lastDrainLog = 0;
+        static uint32_t drainCalls = 0;
+        static bool lastWasSampler = false;
+        drainCalls++;
+        bool isSampler = (xTaskGetCurrentTaskHandle() == _samplerTask);
+        if(micros() - lastDrainLog >= 1000000)
+        {
+            lastDrainLog = micros();
+            DEBUG_INFO("[GYRO-DIAG] drainFifoOnce(): %lu calls/s, caller=%s (sampler=%s)",
+                (unsigned long)drainCalls,
+                isSampler ? "sampler-task" : "main-loop",
+                (_samplerTask != nullptr) ? "exists" : "null");
+            drainCalls = 0;
+            lastWasSampler = isSampler;
+        }
+    }
+
     // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low).
     uint8_t cnt[2];
     if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, 400000))
@@ -649,17 +671,20 @@ void GyroLogWriter::poll()
     if(now - lastHeapCheck >= 1000000)
     {
         lastHeapCheck = now;
+        uint32_t tHeap = micros();
         bool ok = heap_caps_check_integrity_all(true);
+        uint32_t heapUs = micros() - tHeap;
         if(!ok)
             DEBUG_ERROR("[GYRO-DIAG] poll(): HEAP INTEGRITY FAIL at seq=%lu (internal free=%lu, psram free=%lu)",
                 (unsigned long)_fifoSeq, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
         UBaseType_t hwm = (_samplerTask != nullptr) ? uxTaskGetStackHighWaterMark(_samplerTask)
                                                      : uxTaskGetStackHighWaterMark(NULL);
-        // Report whether the sampler task is actually running. If it's null, the
-        // main loop's poll() is doing the FIFO drain (slow -> sample loss).
-        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu samplerTask=%s hwm=%u",
+        // Report whether the sampler task is actually running, and how long the
+        // heap integrity check took (a big number here means the 1 Hz diagnostic
+        // is the slow part of poll(), not the FIFO drain).
+        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu samplerTask=%s hwm=%u heapCheck=%lu us",
             (unsigned long)_fifoSeq, (unsigned long)_ring.bytesUsed(),
-            (_samplerTask != nullptr) ? "RUNNING" : "NULL", (unsigned)hwm);
+            (_samplerTask != nullptr) ? "RUNNING" : "NULL", (unsigned)hwm, (unsigned long)heapUs);
     }
 
     // The dedicated sampler task does the actual FIFO draining (it runs fast
@@ -669,7 +694,11 @@ void GyroLogWriter::poll()
     // the sampler task is not running (e.g. the pre-recording calibration screen
     // reads the IMU via poll() before a recording starts).
     if(_samplerTask == nullptr)
+    {
+        uint32_t tDrain = micros();
         drainFifoOnce();
+        DEBUG_INFO("[GYRO-DIAG] poll(): drainFifoOnce (fallback) took %lu us", (unsigned long)(micros() - tDrain));
+    }
 }
 
 void GyroLogWriter::drainRing()
@@ -817,19 +846,25 @@ void GyroLogWriter::startSamplerTask()
         return; // already running
     _samplerStop = false;
     // 4 KB stack: the task only does a small I2C read and a ring append, so
-    // this is ample. Pinned to core 1 (the same core as the loop task) at
-    // priority 5 -- HIGHER than the loop task (priority 1) and the writer task
-    // (priority 2) -- so it preempts the UI to drain the FIFO promptly and is
-    // never starved by UI/BLE work. The I2C read (core 1) and the SPI card write
-    // (core 0, writer task) stay on separate cores, which is what keeps the
-    // shared-bus contention from stalling the drain.
+    // this is ample. Pinned to CORE 0 (with the writer task) at priority 5 --
+    // HIGHER than the writer task (priority 2) -- so it preempts the writer to
+    // drain the FIFO promptly.
+    //
+    // Why core 0 and NOT core 1: the main loop (UI/BLE work) runs on core 1 and
+    // is busy for ~7 ms every ~50 ms. If the sampler shared core 1 with it, the
+    // sampler could not run during those blocks (same core), so the FIFO
+    // overflowed and we lost ~55% of samples. On core 0 the sampler runs
+    // independently of the main loop. The I2C (sampler) and SPI (writer) are
+    // different peripherals and can operate concurrently on the same core, so
+    // co-locating them on core 0 is fine -- the sampler just preempts the writer
+    // briefly to drain the FIFO.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 1);
+        this, 5, &_samplerTask, 0);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5)");
 }
 
 void GyroLogWriter::stopSamplerTask()
@@ -1151,12 +1186,15 @@ bool GyroLogWriter::end()
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = (uint32_t)((double)_fifoSeq * _tscale * 1000.0);
     _summary.fileSizeBytes = _finalFileSizeBytes;
-    // Total/free space from the volume's cluster counts (SdFat has no
-    // totalBytes()/usedBytes(); FatVolume inherits FatPartition which has
-    // clusterCount(), freeClusterCount(), and bytesPerCluster()).
+    // Total space from the volume's cluster count (cheap: read from the FAT boot
+    // sector, no FAT walk). We deliberately do NOT call freeClusterCount() here:
+    // on a FAT32 card it walks the entire FAT to count free clusters, which took
+    // ~99 s on this card and hung the whole stop path. Free space is a
+    // nice-to-have for the on-screen summary, not essential, so we leave it 0
+    // rather than block the UI for a minute.
     uint32_t bpc = _sd.bytesPerCluster();
     _summary.totalBytes = (uint64_t)_sd.clusterCount() * bpc;
-    _summary.freeBytes = (uint64_t)(int32_t)_sd.freeClusterCount() * bpc;
+    _summary.freeBytes = 0;
 
     _state = State::Idle;
     DEBUG_INFO("[GYRO-DIAG] end(): LEAVE (summary step took %lu us)", (unsigned long)(micros() - tEnter));
