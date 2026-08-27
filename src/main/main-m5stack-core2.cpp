@@ -4369,6 +4369,7 @@ struct ImuTestWriterState
   volatile uint32_t* lastWriteStart;
   volatile uint32_t* lastWriteEnd;
   volatile uint32_t* writeCount;
+  volatile uint32_t* maxWriteDurUs; // longest single writeOut() (SPI bit time)
 };
 
 // The writer task's drain policy. Instead of writing to the card on every
@@ -4423,6 +4424,9 @@ static void imuTestWriterTask(void* param)
       *s->lastWriteStart = wStart;
       *s->lastWriteEnd = wEnd;
       (*s->writeCount)++;
+      uint32_t dur = wEnd - wStart;
+      if(dur > *s->maxWriteDurUs)
+        *s->maxWriteDurUs = dur;
     }
     lastWrite = micros();
   }
@@ -4534,7 +4538,7 @@ static void imuSdWriteTest()
   volatile bool writerStop = false;
   volatile uint64_t writtenBytes = strlen(header); // shared: writer updates it
   // [DIAG] Shared write-window trackers for the sampler's gap correlation.
-  static volatile uint32_t gWriteStart = 0, gWriteEnd = 0, gWriteCount = 0;
+  static volatile uint32_t gWriteStart = 0, gWriteEnd = 0, gWriteCount = 0, gMaxWriteDurUs = 0;
   ImuTestWriterState writerState;
   writerState.ring = &ring;
   writerState.ringMutex = ringMutex;
@@ -4544,6 +4548,7 @@ static void imuSdWriteTest()
   writerState.lastWriteStart = &gWriteStart;
   writerState.lastWriteEnd = &gWriteEnd;
   writerState.writeCount = &gWriteCount;
+  writerState.maxWriteDurUs = &gMaxWriteDurUs;
   // Pin the writer to the OTHER core so its long card writes (up to ~220 ms)
   // never starve the sampler. The Arduino loop task (where this test's sampler
   // runs) is on core 1 on the ESP32, so we pin the writer to core 0.
@@ -4762,8 +4767,8 @@ static void imuSdWriteTest()
     (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
   Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us  maxIter(loop period)=%lu us\n",
     (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs, (unsigned long)maxIterUs);
-  Serial.printf("  [correlation] bigGaps(>2ms)=%lu  of which overlapped a writer SPI write=%lu  (writer writes=%lu)\n",
-    (unsigned long)bigGaps, (unsigned long)bigGapsDuringWrite, (unsigned long)gWriteCount);
+  Serial.printf("  [correlation] bigGaps(>2ms)=%lu  overlapped a writer SPI write=%lu  writer writes=%lu  maxWriteDur=%lu us\n",
+    (unsigned long)bigGaps, (unsigned long)bigGapsDuringWrite, (unsigned long)gWriteCount, (unsigned long)gMaxWriteDurUs);
 #if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
