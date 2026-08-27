@@ -4354,13 +4354,13 @@ static void imuSampleTest()
 // SPI transaction, which may reduce how long a card stall holds the bus and
 // disrupts the I2C IMU read on the other core.
 #ifndef SD_TEST_SCK_MHZ
-#define SD_TEST_SCK_MHZ 20
+#define SD_TEST_SCK_MHZ 4
 #endif
 // The ring buffer size (bytes) that decouples the sampler from the writer. Must
 // be >= the batch size (kMinWriteBytes) or the writer can never accumulate a full
 // batch. 8 KB is the default; bump it (e.g. 32 KB) to test larger write chunks.
 #ifndef SD_TEST_RING_SIZE
-#define SD_TEST_RING_SIZE 98304
+#define SD_TEST_RING_SIZE 8192
 #endif
 // How long (seconds) the no-write (SD_TEST_WRITE=0) variant of the test runs.
 // Bumped to 30 s for the 240 KB chunk test so a few full batches complete.
@@ -4435,7 +4435,7 @@ private:
 // the sampler's own task stalls the 1 kHz cadence.
 struct ImuTestWriterState
 {
-  PsramRing* ring;
+  RingBuf<FatFile, SD_TEST_RING_SIZE>* ring;
   SemaphoreHandle_t ringMutex;
   SemaphoreHandle_t dataSem;
   volatile bool* stop;
@@ -4456,12 +4456,11 @@ struct ImuTestWriterState
 // card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
 // has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
 // transaction rate to a few per 10 ms and gives the I2C long quiet windows.
-static const size_t kMinWriteBytes = 80 * 1024;        // write once >= 80 KB is buffered
-// The max interval is raised to 3 s so the 80 KB threshold (not the timeout) is
-// what triggers a write -- otherwise the 50 ms timeout would fire first and we'd
-// never accumulate a full 80 KB chunk. At 1 kHz (~34 B/sample) 80 KB is ~2.3 s of
-// data, so 3 s is a safe upper bound on how long a write can be deferred.
-static const uint32_t kMaxWriteIntervalUs = 3 * 1000 * 1000; // ...or at most once per 3 s
+// Baseline config: matches the PRODUCTION GyroLogWriter (4 KB batch, 50 ms max
+// interval, 8 KB internal-RAM ring, 4 MHz SPI) so this standalone number
+// represents what a real recording achieves before any writer change.
+static const size_t kMinWriteBytes = 4 * 1024;           // write once >= 4 KB is buffered
+static const uint32_t kMaxWriteIntervalUs = 50 * 1000;   // ...or at most once per 50 ms
 
 static void imuTestWriterTask(void* param)
 {
@@ -4582,16 +4581,13 @@ static void imuSdWriteTest()
   Serial.println("preAllocate skipped (SD_TEST_PREALLOCATE=0)");
 #endif
 
-  // The ring buffer that decouples the 1 kHz sampling from the SD write. It's a
-  // PSRAM-backed ring (PsramRing) so it can be as large as the batch size
-  // (e.g. 96 KB for 80 KB write chunks) without overflowing the ESP32's internal
-  // DRAM at link time. `static` so it survives the function's scope.
-  static PsramRing ring;
-  if(!ring.begin(&file, SD_TEST_RING_SIZE))
-  {
-    Serial.println("PsramRing begin FAILED (ps_malloc)");
-    for(;;) delay(1000);
-  }
+  // The ring buffer that decouples the 1 kHz sampling from the SD write. For the
+  // 8 KB baseline this is the SAME type the production GyroLogWriter uses
+  // (RingBuf<FatFile, 8192>, internal RAM), so the number represents a real
+  // recording before any writer change. `static` so a large ring survives the
+  // function's scope without overflowing the loopTask's stack.
+  static RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
+  ring.begin(&file);
 
   // Write a small GCSV-style header so the file is a plausible log.
   const char* header =
