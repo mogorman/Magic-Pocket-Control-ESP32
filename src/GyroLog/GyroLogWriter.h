@@ -408,6 +408,20 @@ private:
     // Called from begin() before the first sample.
     void configureFifo();
 
+    // Configure the MPU6886 for OUTPUT-REGISTER polling (the 1 kHz sampling mode):
+    // wake the sensor, set the clock source, and set the DLPF/SMPLRT_DIV so the
+    // output registers (0x3B+) refresh at a known rate. We then poll those
+    // registers at 1 kHz from the sampler task. This avoids the FIFO's ~3.8 kHz
+    // rate (which the I2C bus can't drain losslessly) -- at 1 kHz the I2C load is
+    // trivial (~14 KB/s) and the "t" index is dense by construction.
+    void configurePolling();
+
+    // Read the latest gyro+accel sample from the output registers (0x3B..0x48,
+    // 14 bytes: accel 6, temp 2, gyro 6) and append one dense GCSV row to the
+    // ring. Returns the number of rows appended (0 or 1). Used by the sampler
+    // task's 1 kHz poll loop.
+    uint32_t pollOutputRegisters();
+
     // The writer task's main loop: wait for pending rows (or a stop request),
     // then drain the ring to the file. Runs on its own FreeRTOS task.
     static void writerTaskTrampoline(void* param);

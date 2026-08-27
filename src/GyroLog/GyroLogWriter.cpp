@@ -347,6 +347,87 @@ void GyroLogWriter::configureFifo()
     _fifoConfigured = true;
 }
 
+// Configure the sensor for OUTPUT-REGISTER polling at ~1 kHz. We wake the sensor
+// (PWR_MGMT_1: clear SLEEP, select the PLL gyro-X clock for stable timing) and set
+// a DLPF/SMPLRT_DIV that gives a sample rate comfortably above our 1 kHz poll rate
+// (so the output registers always hold a fresh sample when we read them). We do
+// NOT enable the FIFO -- we read the output registers (0x3B+) directly at 1 kHz
+// from the sampler task. This keeps the I2C load trivial (~14 KB/s) and the "t"
+// index dense by construction, avoiding the FIFO's 3.8 kHz rate that the I2C bus
+// can't drain losslessly.
+void GyroLogWriter::configurePolling()
+{
+    // Wake the sensor and select the PLL gyro-X clock (PWR_MGMT_1 = 0x40:
+    // bit6=1 PLL gyro X, SLEEP clear). This is the standard active clock.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x40, 400000);
+    vTaskDelay(pdMS_TO_TICKS(10)); // let the PLL lock
+    // DLPF (CONFIG 0x1A) = 0x01 and SMPLRT_DIV (0x19) = 0. With the clone's
+    // ~3.8 kHz base rate, this keeps the sensor sampling fast; we simply read the
+    // latest output-register value once per 1 ms tick. (The exact sensor ODR
+    // doesn't matter for a 1 kHz poll -- we just need the registers to hold a
+    // fresh sample, which they do at any ODR >= 1 kHz.)
+    M5.In_I2C.writeRegister8(kImuAddr, 0x19, 0x00, 400000); // SMPLRT_DIV = 0
+    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x01, 400000); // CONFIG: DLPF = 0x01
+    // Make sure the FIFO is disabled (we're not using it in this mode).
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // FIFO_EN = 0
+
+    // For the 1 kHz poll mode the output rate is exactly our poll rate (1 kHz),
+    // so tscale is simply 1 ms per sample. We set it here (not measured) because
+    // the poll cadence -- not the sensor's internal ODR -- defines the sample
+    // spacing in the file.
+    _tscale = 0.001f; // 1 ms per sample (1 kHz)
+    DEBUG_INFO("[GYRO] configurePolling(): 1 kHz output-register poll mode, tscale=0.001000 s");
+    _fifoConfigured = true;
+}
+
+// Read the latest gyro+accel sample from the output registers and append one
+// dense GCSV row. The output registers (0x3B..0x48) always hold the most recent
+// sample: accel X/Y/Z (6 B), temp (2 B), gyro X/Y/Z (6 B) = 14 bytes. We read
+// them in a single I2C transaction and write one row with the running _fifoSeq
+// as the "t" index. Because the sampler calls this exactly once per 1 ms tick,
+// the "t" index is dense (0,1,2,...) and the timeline is accurate.
+uint32_t GyroLogWriter::pollOutputRegisters()
+{
+    uint8_t buf[14];
+    // Read 14 bytes starting at 0x3B (the output-register block). Retry a couple
+    // of times on an I2C glitch (a single atomic read; a failure means no data
+    // was transferred, so a retry re-reads the same latest sample).
+    bool ok = false;
+    for(int attempt = 0; attempt < 3 && !ok; attempt++)
+    {
+        ok = M5.In_I2C.readRegister(kImuAddr, 0x3B, buf, 14, _i2cHz);
+    }
+    if(!ok)
+    {
+        _i2cFailures++;
+        return 0; // this tick's sample is lost (a single gap); the next tick recovers
+    }
+
+    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
+    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
+    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
+    // buf[6..7] = temperature (skipped)
+    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
+    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
+    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
+
+    char row[64];
+    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+        (unsigned long)_fifoSeq,
+        (long)rawGx, (long)rawGy, (long)rawGz,
+        (long)rawAx, (long)rawAy, (long)rawAz);
+
+    if(xSemaphoreTake(_ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        _ring.write((const uint8_t*)row, (size_t)n);
+        xSemaphoreGive(_ringMutex);
+        if(_dataSem)
+            xSemaphoreGive(_dataSem); // wake the writer
+    }
+    _fifoSeq++;
+    return 1;
+}
+
 // Diagnostic: sweep the MPU6886's DLPF_CFG (CONFIG 0x1A) and FCHOICE_B
 // (GYRO_CONFIG 0x1B bits[1:0]) and measure the resulting FIFO sample rate for
 // each combination. The goal is to find a config that yields ~1 kHz (which the
@@ -541,10 +622,12 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         return false;
     }
 
-    // Configure the MPU6886's FIFO and measure its true sample rate (stored in
-    // _tscale for the GCSV header). Done before the header is written so the
-    // measured tscale is in the file.
-    configureFifo();
+    // Configure the MPU6886 for 1 kHz output-register polling (sets _tscale = 1
+    // ms). Done before the header is written so the tscale is in the file. We use
+    // output-register polling (not the FIFO) because the FIFO's ~3.8 kHz rate is
+    // faster than the I2C bus can drain losslessly; at 1 kHz the I2C load is
+    // trivial and the sample index is dense by construction.
+    configurePolling();
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
@@ -948,11 +1031,8 @@ void GyroLogWriter::stopWriterTask()
 // so we don't churn the tight internal heap with a 4 KB alloc/free per recording
 // (that fragmentation made the 2nd recording's xTaskCreate fail). When not
 // recording it sleeps; when a recording starts (begin() sets _state=Recording) it
-// wakes and drains the FIFO in a TIGHT loop -- drain whatever is in the FIFO,
-// then immediately re-poll. When the FIFO is empty, drainFifoOnce() does only a
-// 2-byte count read and returns fast, so the loop spins cheaply and the FIFO
-// paces us (no fixed delay -- a delay is what let the FIFO fall behind and lose
-// samples).
+// wakes and polls the MPU6886 output registers once per 1 ms tick -- a clean,
+// dense 1 kHz sample stream.
 void GyroLogWriter::samplerTaskTrampoline(void* param)
 {
     ((GyroLogWriter*)param)->samplerTask();
@@ -961,14 +1041,6 @@ void GyroLogWriter::samplerTaskTrampoline(void* param)
 
 void GyroLogWriter::samplerTask()
 {
-    // We drain the FIFO back-to-back (no yield) to maximize I2C throughput -- the
-    // sensor's ~3.8 kHz FIFO fill rate is right at the I2C bus limit, so any
-    // yield we insert costs captured samples. But the writer task (same core,
-    // lower priority) needs to be scheduled occasionally to commit the ring to the
-    // card, so we yield 1 tick every kYieldEvery drains. The 128 KB ring absorbs
-    // the brief writer preemptions.
-    const uint32_t kYieldEvery = 20;
-    uint32_t drainsSinceYield = 0;
     for(;;)
     {
         // Not recording: poll _state every ~5 ms (cheap) until a recording
@@ -981,17 +1053,14 @@ void GyroLogWriter::samplerTask()
             continue;
         }
 
-        // Drain everything currently in the FIFO. drainFifoOnce() reads the count
-        // and, if there's data, reads it out and appends rows to the ring (waking
-        // the writer task). When the FIFO is empty it just does a 2-byte count
-        // read and returns 0.
-        drainFifoOnce();
-
-        if(++drainsSinceYield >= kYieldEvery)
-        {
-            drainsSinceYield = 0;
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        // 1 kHz poll: read the latest gyro+accel sample from the output registers
+        // and append one dense row. We use a 1 ms delay as the tick. vTaskDelay
+        // on the ESP32 is accurate to ~15 us at 80/160 MHz, so the cadence holds
+        // ~1 kHz. If a tick is ever missed (a brief stall), we simply lose that
+        // one sample (a single gap) and the next tick recovers -- the "t" index
+        // stays dense because we only ever append one row per tick.
+        pollOutputRegisters();
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -1026,9 +1095,9 @@ void GyroLogWriter::stopSamplerTask()
 {
     // The sampler task is persistent -- we don't delete it. We just make it sleep
     // by clearing the recording state (done in end()) and wake it so it notices.
-    // We do a final FIFO drain here (on the calling task) to flush the very end
-    // of the clip into the ring before the writer commits it.
-    drainFifoOnce();
+    // We do one final output-register read here (on the calling task) to flush the
+    // very end of the clip into the ring before the writer commits it.
+    pollOutputRegisters();
     if(_dataSem)
         xSemaphoreGive(_dataSem); // wake the sampler so it sees _state != Recording
 }
@@ -1424,12 +1493,12 @@ bool GyroLogWriter::end()
     DEBUG_INFO("[GYRO-DIAG] end(): drainRing took %lu us", (unsigned long)(micros() - tEnter));
     tEnter = micros();
 
-    // Restore the MPU6886 to a clean state now that we're done sampling: disable
-    // the FIFO and put the clock source back to M5Unified's default (the 8 MHz
-    // RC, PWR_MGMT_1=0x01) so the calibration screen's readImu() and any later
-    // M5Unified use see the sensor the way they expect. The output registers
-    // (0x3B+) still hold the latest sample regardless, so this only affects the
-    // FIFO/clock config.
+    // Restore the MPU6886 to a clean state now that we're done sampling: clear
+    // the FIFO-enable (a no-op in polling mode, but harmless) and put the clock
+    // source back to M5Unified's default (the 8 MHz RC, PWR_MGMT_1=0x01) so the
+    // calibration screen's readImu() and any later M5Unified use see the sensor the
+    // way they expect. The output registers (0x3B+) still hold the latest sample
+    // regardless, so this only affects the clock/FIFO config.
     M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // FIFO_EN = 0 (disable FIFO)
     M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000); // clock src = 8 MHz RC (M5Unified default)
     _fifoConfigured = false;
