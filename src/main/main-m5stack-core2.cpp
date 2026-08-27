@@ -4356,6 +4356,12 @@ static void imuSampleTest()
 #ifndef SD_TEST_SCK_MHZ
 #define SD_TEST_SCK_MHZ 20
 #endif
+// The ring buffer size (bytes) that decouples the sampler from the writer. Must
+// be >= the batch size (kMinWriteBytes) or the writer can never accumulate a full
+// batch. 8 KB is the default; bump it (e.g. 32 KB) to test larger write chunks.
+#ifndef SD_TEST_RING_SIZE
+#define SD_TEST_RING_SIZE 32768
+#endif
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
 // main loop) appends rows to the ring; the writer task (a separate FreeRTOS
@@ -4364,7 +4370,7 @@ static void imuSampleTest()
 // the sampler's own task stalls the 1 kHz cadence.
 struct ImuTestWriterState
 {
-  RingBuf<FatFile, 8192>* ring;
+  RingBuf<FatFile, SD_TEST_RING_SIZE>* ring;
   SemaphoreHandle_t ringMutex;
   SemaphoreHandle_t dataSem;
   volatile bool* stop;
@@ -4385,7 +4391,7 @@ struct ImuTestWriterState
 // card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
 // has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
 // transaction rate to a few per 10 ms and gives the I2C long quiet windows.
-static const size_t kMinWriteBytes = 4 * 1024;        // write once >= 4 KB is buffered
+static const size_t kMinWriteBytes = 20 * 1024;        // write once >= 20 KB is buffered
 static const uint32_t kMaxWriteIntervalUs = 50 * 1000; // ...or at most once per 50 ms
 
 static void imuTestWriterTask(void* param)
@@ -4509,7 +4515,7 @@ static void imuSdWriteTest()
 
   // The ring buffer that decouples the 1 kHz sampling from the SD write,
   // exactly as GyroLogWriter uses it.
-  RingBuf<FatFile, 8192> ring;
+  RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
   ring.begin(&file);
 
   // Write a small GCSV-style header so the file is a plausible log.
