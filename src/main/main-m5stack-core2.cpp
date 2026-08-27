@@ -4424,7 +4424,12 @@ static void imuTestWriterTask(void* param)
       xSemaphoreGive(s->ringMutex);
     }
   }
-  vTaskDelete(nullptr);
+  // Do NOT self-delete here: the test's teardown calls vTaskDelete(writerTask)
+  // exactly once. If we self-deleted too, that call would hit a stale handle and
+  // crash (LoadProhibited in vTaskDelete). Block forever until the teardown
+  // deletes us.
+  for(;;)
+    vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 static void imuSdWriteTest()

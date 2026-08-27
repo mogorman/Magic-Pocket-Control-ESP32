@@ -596,7 +596,11 @@ void GyroLogWriter::drainRing()
 void GyroLogWriter::writerTaskTrampoline(void* param)
 {
     ((GyroLogWriter*)param)->writerTask();
-    vTaskDelete(nullptr);
+    // Do NOT self-delete: stopWriterTask() calls vTaskDelete(_writerTask) exactly
+    // once. Self-deleting here too would make that call hit a stale handle and
+    // crash (LoadProhibited in vTaskDelete). Block until the teardown deletes us.
+    for(;;)
+        vTaskDelay(pdMS_TO_TICKS(1000));
 }
 
 void GyroLogWriter::writerTask()
@@ -658,9 +662,9 @@ void GyroLogWriter::stopWriterTask()
     _writerStop = true;
     if(_dataSem)
         xSemaphoreGive(_dataSem);
-    // Wait for the writer task to finish its final drain and delete itself.
+    // Give the writer a moment to notice the stop, do its final drain, and reach
+    // its blocking loop. Then delete it exactly once (it does not self-delete).
     vTaskDelay(pdMS_TO_TICKS(100));
-    // If it is still around (it should not be), delete it explicitly.
     if(_writerTask != nullptr)
     {
         vTaskDelete(_writerTask);
