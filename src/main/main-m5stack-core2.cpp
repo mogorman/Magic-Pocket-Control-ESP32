@@ -4362,7 +4362,9 @@ static void imuSampleTest()
 //   -1 = running the DLPF/FCHOICE_B rate sweep (diagnostic)
 //   0 = waiting to start   1 = recording   2 = stopped, about to verify
 //   3 = done (reported)
-static int e2eState = -1;
+// Start at 0 to skip the (already-run) rate sweep and go straight to the record
+// test; set to -1 to run the sweep first.
+static int e2eState = 0;
 static uint32_t e2eStartMs = 0;   // millis() when the record start was queued
 static std::string e2eClipName;  // the clip name we started (to find the file)
 

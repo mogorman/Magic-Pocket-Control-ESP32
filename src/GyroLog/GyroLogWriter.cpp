@@ -932,16 +932,15 @@ void GyroLogWriter::samplerTask()
         // and, if there's data, reads it out and appends rows to the ring (waking
         // the writer task). When the FIFO is empty it just does a 2-byte count
         // read and returns 0.
-        uint32_t got = drainFifoOnce();
-        if(got == 0)
-        {
-            // The FIFO is empty right now. Yield one tick so the main loop task
-            // (same core, lower priority) gets to run -- it has to process the
-            // record-stop request and the UI. At the sensor's ~2.8 kHz the FIFO
-            // refills within a few hundred us, so a 1-tick yield (~1 ms) costs at
-            // most a handful of buffered samples, which the FIFO holds for us.
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+        drainFifoOnce();
+
+        // Yield one tick after every drain pass. This lets the writer task (same
+        // core, lower priority) get scheduled to commit the ring to the card, and
+        // keeps the sampler from monopolizing the core. At the sensor's ~3.8 kHz
+        // the FIFO gains ~4 packets per 1 ms, so a 1-tick (~1 ms) yield between
+        // drains still keeps the FIFO shallow (we drain ~4 packets per pass, well
+        // under the 73-packet buffer) and the 128 KB ring absorbs any jitter.
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     // Final drain on the way out: pull any remaining FIFO packets into the ring so
@@ -956,20 +955,26 @@ void GyroLogWriter::startSamplerTask()
         return; // already running
     _samplerStop = false;
     // 4 KB stack: the task only does a small I2C read and a ring append, so
-    // this is ample. Pinned to CORE 1 (the same core the standalone test's
-    // sampler ran on) at priority 5 -- HIGHER than the main loop task
-    // (priority 1) -- so the sampler preempts the UI/BLE work to drain the FIFO
-    // in a tight loop, exactly like the test that held a clean ~2.8 kHz. The
-    // writer task stays on core 0, so its long SPI card writes never starve the
-    // sampler (different core). The I2C (sampler, core 1) and SPI (writer, core
-    // 0) are separate peripherals on separate cores, so they don't contend.
+    // this is ample. Pinned to CORE 0 at priority 5.
+    //
+    // Why core 0 and not core 1: the main loop (UI/BLE/camera work) runs on
+    // core 1. A tight-loop sampler on core 1 at priority 5 PREEMPTS the main
+    // loop so heavily that the main loop can't run (it can't process the
+    // record-stop request or refresh the UI -- the "stuck recording" bug). On
+    // core 0 the sampler is independent of the main loop: the main loop runs
+    // freely on core 1, and the sampler drains the FIFO on core 0. The sampler
+    // (prio 5) preempts the writer task (prio 2, also core 0) during its I2C
+    // reads, but the writer only needs to run every ~50 ms to commit an 80 KB
+    // batch, and the 128 KB ring absorbs the brief preemptions. I2C (sampler)
+    // and SPI (writer) are separate peripherals, so co-locating them on core 0
+    // is fine.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 1);
+        this, 5, &_samplerTask, 0);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5)");
 }
 
 void GyroLogWriter::stopSamplerTask()
