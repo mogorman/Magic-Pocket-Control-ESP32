@@ -331,10 +331,16 @@ void GyroLogWriter::configureFifo()
         }
     }
     uint32_t calMs = calCountStart ? ((micros() - calCountStart) / 1000) : 0;
-    float rate = calMs ? (calPackets * 1000.0f) / calMs : 0.0f; // samples/sec
-    _tscale = rate ? (1.0f / rate) : 0.001f;                    // seconds/sample
-    DEBUG_INFO("[GYRO] configureFifo(): measured rate = %.1f Hz -> tscale=%.6f s",
-        (double)rate, (double)_tscale);
+    float rate = calMs ? (calPackets * 1000.0f) / calMs : 0.0f; // source samples/sec (~3.8 kHz)
+    // We decimate to 1 of every kDecimateN packets, so the GCSV "t" index advances
+    // once per kDecimateN source samples. The true seconds-per-OUTPUT-sample is
+    // therefore kDecimateN times the source interval. This is what Gyroflow uses to
+    // space the (dense, gap-free) samples on the timeline, so it must reflect the
+    // decimated rate, not the raw sensor rate.
+    float outRate = rate / (float)kDecimateN; // ~950 Hz
+    _tscale = outRate > 0.0f ? (1.0f / outRate) : 0.001f;
+    DEBUG_INFO("[GYRO] configureFifo(): source rate = %.1f Hz, decimated x%lu -> out %.1f Hz, tscale=%.6f s",
+        (double)rate, (unsigned long)kDecimateN, (double)outRate, (double)_tscale);
 
     // Reset the FIFO so the real recording starts from a clean t=0.
     M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, 400000); // FIFO_RESET
@@ -612,6 +618,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _lastSampleMicros = _startMicros;
     _lastDrainMicros = _startMicros;
     _fifoSeq = 0; // GCSV "t" starts at 0 (the first drained FIFO packet)
+    _decimatePacket = 0; // reset the decimation phase for this clip
     _i2cFailures = 0;
     _fifoOverflows = 0;
 
@@ -681,11 +688,15 @@ uint32_t GyroLogWriter::drainFifoOnce()
         return 0; // nothing buffered yet
 
     // If the FIFO is full (1024 bytes) it has overflowed -- we fell behind. Reset
-    // it and resync the sequence so we don't keep reading misaligned data.
+    // the FIFO data so we don't keep reading misaligned/stale packets. We do NOT
+    // reset _fifoSeq to 0 here: that would create a backwards step in the "t" index
+    // (a duplicate t=0,1,2...), which corrupts Gyroflow's timeline. Instead the
+    // index just continues; the overflow drops some samples (a gap) but the index
+    // stays monotonically increasing. (With decimation to ~1 kHz the FIFO drains
+    // slowly, so overflows should be rare.)
     if(fifoBytes >= 1024)
     {
         M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, i2cHz); // FIFO_RESET
-        _fifoSeq = 0;
         _fifoOverflows++;
         return 0;
     }
@@ -728,6 +739,15 @@ uint32_t GyroLogWriter::drainFifoOnce()
         size_t fullPackets = chunk / 14;
         for(size_t p = 0; p < fullPackets * 14; p += 14)
         {
+            // Decimate: count EVERY packet (so the sampling phase is stable and the
+            // output rate is exactly sourceRate/kDecimateN), but only emit a row --
+            // and advance the dense "t" index -- for every kDecimateNth packet. This
+            // yields a clean, gap-free ~1 kHz stream instead of a lossy 3.8 kHz
+            // one with gaps (which Gyroflow would mis-time).
+            _decimatePacket++;
+            if(_decimatePacket % kDecimateN != 0)
+                continue;
+
             // FIFO packet layout (gyro+accel enabled): accel 6 bytes
             // (buf[0..5]), temp 2 bytes (buf[6..7]), gyro 6 bytes (buf[8..13]).
             int16_t rawAx = (int16_t)((_fifoBuf[p + 0] << 8) | _fifoBuf[p + 1]);

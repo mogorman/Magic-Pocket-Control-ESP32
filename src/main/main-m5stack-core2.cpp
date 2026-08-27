@@ -4449,9 +4449,11 @@ static void gyroE2ETestTick()
         snprintf(path, sizeof(path), "/%s.gcsv", e2eClipName.c_str());
         long samples = gyroLog.countSamplesInFile(path);
 
-        // The expected sample count is the wall-clock duration times the measured
-        // IMU rate (measured at begin()). If the sampler kept up, the recorded
-        // count should match this; a big shortfall means samples were lost.
+        // The expected sample count is the wall-clock duration times the OUTPUT
+        // (decimated) rate. measuredRateHz() = 1/_tscale, and _tscale is set to the
+        // decimated interval (source rate / kDecimateN), so this is the ~1 kHz
+        // output rate. If the sampler kept up, the recorded count should match this;
+        // a big shortfall means samples were lost to the I2C bus.
         double wallSec = (double)GYRO_E2E_DURATION_S;
         double rateHz = (double)gyroLog.measuredRateHz();
         long expected = (long)(wallSec * rateHz);

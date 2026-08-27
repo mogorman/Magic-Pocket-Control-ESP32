@@ -355,6 +355,15 @@ private:
     volatile uint32_t _fifoOverflows = 0;
     float _tscale = 0.001f;         // measured seconds-per-sample (written to the header)
     bool _fifoConfigured = false;  // true once begin() set up the FIFO
+    // ---- Decimation to a clean, gap-free output rate (e.g. ~1 kHz) ----
+    // The sensor's FIFO runs at ~3.8 kHz, faster than the I2C bus can drain
+    // losslessly, so we DECIMATE: keep every Nth packet and write a dense
+    // t=0,1,2,... index at the decimated rate. N is chosen so the output is
+    // ~1 kHz (3.8k/4 = ~950 Hz). _decimatePacket is a running counter over ALL
+    // packets read (not just the ones we keep) so the sampling phase is stable
+    // and the output rate is exactly sourceRate/N.
+    static const uint32_t kDecimateN = 4; // keep 1 of every 4 packets -> ~950 Hz
+    uint32_t _decimatePacket = 0;          // running count of all packets read
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
