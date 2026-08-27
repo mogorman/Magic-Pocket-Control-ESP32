@@ -4362,6 +4362,13 @@ struct ImuTestWriterState
   SemaphoreHandle_t dataSem;
   volatile bool* stop;
   volatile uint64_t* writtenBytes;
+  // [DIAG] Correlate the sampler's big gaps with the writer's SPI write windows.
+  // The writer records the micros() window of each card write; the sampler, when
+  // it sees a gap > 2 ms, checks whether that gap overlaps a write window. If
+  // they line up, the 6 ms sampler preemptions are caused by the SPI activity.
+  volatile uint32_t* lastWriteStart;
+  volatile uint32_t* lastWriteEnd;
+  volatile uint32_t* writeCount;
 };
 
 // The writer task's drain policy. Instead of writing to the card on every
@@ -4407,9 +4414,15 @@ static void imuTestWriterTask(void* param)
     if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) == pdTRUE)
     {
       size_t toWrite = s->ring->bytesUsed();
+      uint32_t wStart = micros();
       s->ring->writeOut(toWrite);
+      uint32_t wEnd = micros();
       *s->writtenBytes += toWrite;
       xSemaphoreGive(s->ringMutex);
+      // [DIAG] Record this write's window for the sampler to correlate against.
+      *s->lastWriteStart = wStart;
+      *s->lastWriteEnd = wEnd;
+      (*s->writeCount)++;
     }
     lastWrite = micros();
   }
@@ -4520,12 +4533,17 @@ static void imuSdWriteTest()
   SemaphoreHandle_t dataSem = xSemaphoreCreateBinary();
   volatile bool writerStop = false;
   volatile uint64_t writtenBytes = strlen(header); // shared: writer updates it
+  // [DIAG] Shared write-window trackers for the sampler's gap correlation.
+  static volatile uint32_t gWriteStart = 0, gWriteEnd = 0, gWriteCount = 0;
   ImuTestWriterState writerState;
   writerState.ring = &ring;
   writerState.ringMutex = ringMutex;
   writerState.dataSem = dataSem;
   writerState.stop = &writerStop;
   writerState.writtenBytes = &writtenBytes;
+  writerState.lastWriteStart = &gWriteStart;
+  writerState.lastWriteEnd = &gWriteEnd;
+  writerState.writeCount = &gWriteCount;
   // Pin the writer to the OTHER core so its long card writes (up to ~220 ms)
   // never starve the sampler. The Arduino loop task (where this test's sampler
   // runs) is on core 1 on the ESP32, so we pin the writer to core 0.
@@ -4555,6 +4573,8 @@ static void imuSdWriteTest()
   uint32_t maxSerialUs = 0;     // longest once-per-second Serial.printf
   uint32_t lastIter = 0;        // micros() at the previous loop iteration (loop-period tracking)
   uint32_t maxIterUs = 0;       // longest gap between consecutive loop iterations
+  uint32_t bigGaps = 0;         // count of >2 ms sample gaps
+  uint32_t bigGapsDuringWrite = 0; // ...of those that overlapped a writer SPI write
 
   Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
   for(;;)
@@ -4625,6 +4645,17 @@ static void imuSdWriteTest()
       uint32_t gap = now - lastSampleTime;
       if(gap > maxGapUs)
         maxGapUs = gap;
+      // [DIAG] Correlate big gaps (> 2 ms) with the writer's SPI write windows.
+      // The gap spans [lastSampleTime, now]. If the last write window [gWriteStart,
+      // gWriteEnd] overlaps it, the SPI activity likely caused the preemption.
+      if(gap > 2000)
+      {
+        bigGaps++;
+        uint32_t ws = gWriteStart, we = gWriteEnd;
+        // Overlap if the write window intersects [lastSampleTime, now].
+        if(ws < now && we > lastSampleTime)
+          bigGapsDuringWrite++;
+      }
     }
     lastSampleTime = now;
 
@@ -4731,6 +4762,8 @@ static void imuSdWriteTest()
     (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
   Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us  maxIter(loop period)=%lu us\n",
     (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs, (unsigned long)maxIterUs);
+  Serial.printf("  [correlation] bigGaps(>2ms)=%lu  of which overlapped a writer SPI write=%lu  (writer writes=%lu)\n",
+    (unsigned long)bigGaps, (unsigned long)bigGapsDuringWrite, (unsigned long)gWriteCount);
 #if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
