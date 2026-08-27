@@ -61,6 +61,26 @@ public:
         }
         return count;
     }
+    // Copy up to `count` buffered bytes out of the ring into a caller-provided
+    // buffer (a fast PSRAM->RAM memcpy) and advance the ring tail, WITHOUT doing
+    // the (slow) SD write. This lets the writer hold the ring mutex only for the
+    // fast copy, then do the slow SD write on the local buffer without the mutex --
+    // so the sampler's ring appends are never blocked by a card write. Returns the
+    // number of bytes copied.
+    size_t copyOut(uint8_t* dst, size_t count)
+    {
+        size_t avail = used();
+        count = count < avail ? count : avail;
+        size_t n = count < (_size - _tail) ? count : (_size - _tail);
+        memcpy(dst, _buf + _tail, n);
+        _tail = (_tail + n) % _size;
+        if(n < count)
+        {
+            memcpy(dst + n, _buf, count - n);
+            _tail = count - n;
+        }
+        return count;
+    }
     size_t used() const { return (_head >= _tail) ? (_head - _tail) : (_size - _tail + _head); }
     size_t bytesUsed() const { return used(); } // alias matching SdFat RingBuf's name
     size_t freeSpace() const { return _size - used(); }
@@ -381,7 +401,7 @@ private:
     // (400k-1.5M) showed 1.5 MHz gives the best capture with the fewest I2C read
     // failures on this clone, so that's the default. (If a different board's
     // sensor misbehaves at 1.5 MHz, drop this back to 1000000 or 400000.)
-    static const uint32_t kImuI2cHz = 1500000;
+    static const uint32_t kImuI2cHz = 1000000;
     // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
     // E2E test can override it via setI2cHz() to sweep for the best value.
     uint32_t _i2cHz = kImuI2cHz;

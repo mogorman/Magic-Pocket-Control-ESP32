@@ -940,15 +940,41 @@ void GyroLogWriter::drainRing()
     if(!_file.isOpen())
         return;
 
-    // Commit everything buffered in the ring to the file. RingBuf::writeOut()
-    // reads from the ring and calls FatFile::write() (a direct FatFs f_write,
-    // no newlib stdio FILE buffer). This runs on the writer task (or once from
-    // end() on the loop task), so hold _ringMutex to keep the sampler's ring
-    // appends from interleaving with the drain.
+    // Two-phase drain so the ring mutex is held only for a FAST copy, not the
+    // slow SD write. Phase 1 (under the mutex): copy the buffered bytes out of the
+    // PSRAM ring into a local RAM buffer. Phase 2 (NO mutex): do the slow
+    // FatFile::write() on the local buffer. Holding the mutex only for the copy
+    // means the sampler's ring appends (which also need the mutex) are never
+    // blocked by a multi-ms card write -- that blocking was what made the 1 kHz
+    // sampler miss ~10% of its ticks.
+    size_t used = _ring.bytesUsed();
+    if(used == 0)
+        return;
+
+    // A local buffer big enough for the largest batch we'll copy at once. The
+    // writer commits in kMinWriteBytes (80 KB) batches, so 96 KB is ample. This
+    // is allocated once (static) and reused.
+    static uint8_t* s_scratch = nullptr;
+    static size_t s_scratchSize = 0;
+    if(s_scratchSize < used)
+    {
+        if(s_scratch)
+            free(s_scratch);
+        s_scratchSize = used < (96 * 1024) ? (96 * 1024) : used;
+        s_scratch = (uint8_t*)malloc(s_scratchSize);
+        if(!s_scratch)
+            return; // can't allocate; skip this drain (data stays in the ring)
+    }
+
+    // Phase 1: fast copy out of the ring, under the mutex.
     if(xSemaphoreTake(_ringMutex, portMAX_DELAY) != pdTRUE)
         return;
-    _ring.writeOut(_ring.bytesUsed());
+    size_t copied = _ring.copyOut(s_scratch, used);
     xSemaphoreGive(_ringMutex);
+
+    // Phase 2: slow SD write of the copied bytes, WITHOUT the mutex.
+    if(copied > 0)
+        _file.write(s_scratch, copied);
 }
 
 // The writer task's main loop. It waits (with a short timeout) for the sampler
