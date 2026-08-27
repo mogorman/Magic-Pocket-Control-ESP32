@@ -4310,6 +4310,55 @@ static void imuSampleTest()
 #define SD_TEST_WRITE 0
 #endif
 
+// Shared state for the test's dedicated writer task. The sampler (the test's
+// main loop) appends rows to the ring; the writer task (a separate FreeRTOS
+// task on the other core) commits the ring to the card. This mirrors
+// GyroLogWriter and is the fix for the 76%-capture problem: a card write on
+// the sampler's own task stalls the 1 kHz cadence.
+struct ImuTestWriterState
+{
+  RingBuf<FatFile, 8192>* ring;
+  SemaphoreHandle_t ringMutex;
+  SemaphoreHandle_t dataSem;
+  volatile bool* stop;
+  volatile uint64_t* writtenBytes;
+};
+
+static void imuTestWriterTask(void* param)
+{
+  ImuTestWriterState* s = (ImuTestWriterState*)param;
+  for(;;)
+  {
+    if(*s->stop)
+      break;
+    if(xSemaphoreTake(s->dataSem, pdMS_TO_TICKS(20)) == pdTRUE)
+    {
+      if(s->ring->bytesUsed() > 0)
+      {
+        if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) == pdTRUE)
+        {
+          size_t used = s->ring->bytesUsed();
+          s->ring->writeOut(used);
+          *s->writtenBytes += used;
+          xSemaphoreGive(s->ringMutex);
+        }
+      }
+    }
+  }
+  // Final drain on the way out, so no buffered rows are lost.
+  if(s->ring->bytesUsed() > 0)
+  {
+    if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) == pdTRUE)
+    {
+      size_t used = s->ring->bytesUsed();
+      s->ring->writeOut(used);
+      *s->writtenBytes += used;
+      xSemaphoreGive(s->ringMutex);
+    }
+  }
+  vTaskDelete(nullptr);
+}
+
 static void imuSdWriteTest()
 {
   Serial.begin(115200);
@@ -4387,11 +4436,26 @@ static void imuSdWriteTest()
   uint32_t samples = 0;
   uint32_t i2cFails = 0;
   bool heapFail = false;
-  // Bytes actually written to the file (header + every drained row). We track
-  // this ourselves because preAllocate() makes FatFile::fileSize() report the
-  // full pre-allocated size (14 MB) immediately, so fileSize() can't be used as
-  // a "how much have we written" stop condition.
-  uint64_t writtenBytes = strlen(header);
+
+  // ---- Dedicated writer task (the thing under test) ----
+  // The sampler (this loop) only appends rows to the ring; a separate FreeRTOS
+  // task on the other core commits the ring to the card. This is the same
+  // architecture GyroLogWriter uses, and it's the fix for the 76%-capture
+  // problem: a card write on the sampler's own task stalls the 1 kHz cadence.
+  // The ring is shared between the two tasks, so a mutex serializes access.
+  SemaphoreHandle_t ringMutex = xSemaphoreCreateMutex();
+  SemaphoreHandle_t dataSem = xSemaphoreCreateBinary();
+  volatile bool writerStop = false;
+  volatile uint64_t writtenBytes = strlen(header); // shared: writer updates it
+  ImuTestWriterState writerState;
+  writerState.ring = &ring;
+  writerState.ringMutex = ringMutex;
+  writerState.dataSem = dataSem;
+  writerState.stop = &writerStop;
+  writerState.writtenBytes = &writtenBytes;
+  TaskHandle_t writerTask = nullptr;
+  xTaskCreate(imuTestWriterTask, "imuTestWriter", 8192, &writerState, 2, &writerTask);
+  Serial.println("writer task started (1 kHz sampler + dedicated SD writer)");
   // Drop-rate diagnostics. At 1 kHz we expect exactly 1 sample per ms, so the
   // "expected" sample count is the elapsed time in ms. Comparing actual vs
   // expected tells us whether we're capturing a constant 1 kHz rate or missing
@@ -4431,8 +4495,17 @@ static void imuSdWriteTest()
       (unsigned long)((now - start) / 1000),
       (long)rawGx, (long)rawGy, (long)rawGz,
       (long)rawAx, (long)rawAy, (long)rawAz);
-    ring.write((const uint8_t*)row, (size_t)n);
+
+    // Append the row to the ring under the mutex (the writer task also touches
+    // it), then wake the writer. The sampler never does the card write itself.
+    if(xSemaphoreTake(ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+      ring.write((const uint8_t*)row, (size_t)n);
+      xSemaphoreGive(ringMutex);
+    }
     samples++;
+    if(dataSem)
+      xSemaphoreGive(dataSem);
 
     // Track the gap since the previous sample. At a true 1 kHz rate this is
     // ~1000 us; a much larger value means the loop was stalled (not that the
@@ -4444,20 +4517,6 @@ static void imuSdWriteTest()
         maxGapUs = gap;
     }
     lastSampleTime = now;
-
-    // Drain the ring to the file at most once per 50 ms (20 Hz), same as the
-    // logger. With SD_TEST_WRITE=0 we do NOT write to the card at all (the ring
-    // just fills and drops), to isolate whether the SD write is what stalls the
-    // sampler.
-#if SD_TEST_WRITE
-    if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
-    {
-      lastDrain = now;
-      size_t used = ring.bytesUsed();
-      writtenBytes += used;
-      ring.writeOut(used);
-    }
-#endif
 
     // Once per second: check heap integrity + report progress.
     if(now - lastHeapCheck >= 1000000)
@@ -4497,11 +4556,20 @@ static void imuSdWriteTest()
 
   uint64_t finalSize = 0;
 #if SD_TEST_WRITE
-  // Final drain + close. If we pre-allocated, truncate() frees the unused
+  // Stop the writer task. It does a final drain of any stragglers on the way
+  // out, so after this the ring is empty and no more writes are in flight.
+  writerStop = true;
+  if(dataSem)
+    xSemaphoreGive(dataSem);
+  vTaskDelay(pdMS_TO_TICKS(100));
+  if(writerTask != nullptr)
+  {
+    vTaskDelete(writerTask);
+    writerTask = nullptr;
+  }
+  // Close the file. If we pre-allocated, truncate() frees the unused
   // pre-allocated clusters and shrinks the file to the real written size; if we
   // didn't pre-allocate, the file is already the right size so we skip it.
-  writtenBytes += ring.bytesUsed();
-  ring.writeOut(ring.bytesUsed());
 #if SD_TEST_PREALLOCATE
   uint32_t tTrunc = micros();
   file.truncate();
@@ -4514,6 +4582,8 @@ static void imuSdWriteTest()
   sd.end();
   SPI.begin();
   sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4)));
+  vSemaphoreDelete(ringMutex);
+  vSemaphoreDelete(dataSem);
 #else
   // Not writing to the card: just close the (empty) file we opened.
   file.close();

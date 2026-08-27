@@ -277,6 +277,22 @@ bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* a
     return true;
 }
 
+GyroLogWriter::~GyroLogWriter()
+{
+    // Stop the writer task (if running) and delete the FreeRTOS objects.
+    stopWriterTask();
+    if(_ringMutex)
+    {
+        vSemaphoreDelete(_ringMutex);
+        _ringMutex = nullptr;
+    }
+    if(_dataSem)
+    {
+        vSemaphoreDelete(_dataSem);
+        _dataSem = nullptr;
+    }
+}
+
 // Make sure the SD card is mounted via SdFat. The Core2's microSD slot is on
 // the SPI bus with its chip-select on GPIO4. We share the SPI bus with the
 // M5GFX display (SHARED_SPI), so SdFat toggles only the SD's CS pin. The SPI
@@ -450,7 +466,18 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
     // Write the header straight to the file (before any samples). A single
     // FatFile::write of the whole header is fine -- it's a few hundred bytes.
+    // (The writer task is not started yet, so this is the only writer right now.)
     _file.write((const uint8_t*)header, (size_t)n);
+
+    // Create the ring's cross-task synchronization objects and start the writer
+    // task. The sampler (loop task) will append rows to the ring; the writer
+    // task (other core) commits them to the card.
+    if(!_ringMutex)
+        _ringMutex = xSemaphoreCreateMutex();
+    if(!_dataSem)
+        _dataSem = xSemaphoreCreateBinary();
+    _writerStop = false;
+    startWriterTask();
 
     _tMs = 0;
     _startMicros = micros();
@@ -516,28 +543,30 @@ void GyroLogWriter::poll()
 
     // Append the row to the ring buffer. RingBuf::write() drops the data if the
     // buffer is full (it never blocks), so a full ring just means a sample is
-    // dropped -- we never stall the 1 kHz cadence. This is the exact
-    // TeensySdioLogger pattern: the sampler writes into the RingBuf, and a
-    // separate drain commits it to the file.
-    _ring.write((const uint8_t*)row, (size_t)n);
-
-    // Drain the ring to the file, but rate-limit the writes. The 1 kHz sampling
-    // fills the ring continuously; we flush it at most once per 50 ms (20 Hz)
-    // and only once a decent chunk has accumulated. This runs on the same (loop)
-    // task as the I2C sampling -- there is no separate writer task.
-    if(now - _lastDrainMicros >= 50000 && _ring.bytesUsed() >= 1024)
+    // dropped -- we never stall the 1 kHz cadence. The ring is shared with the
+    // writer task, so we hold _ringMutex around the append.
+    if(xSemaphoreTake(_ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
     {
-        _lastDrainMicros = now;
-        drainRing();
+        _ring.write((const uint8_t*)row, (size_t)n);
+        xSemaphoreGive(_ringMutex);
     }
 
-    // [DIAG] Per-second: confirm the sampler is filling the ring and draining it.
+    // Wake the writer task so it commits the ring to the card. The actual
+    // FatFile::write() happens on the writer task (other core), NOT here, so the
+    // sampler's 1 ms cadence is never blocked by a card write.
+    if(_dataSem)
+        xSemaphoreGive(_dataSem);
+
+    // [DIAG] Per-second: confirm the sampler is filling the ring and the writer
+    // is draining it. ringUsed should stay well below the 8 KB ring size if the
+    // writer keeps up.
     static uint32_t lastPollLog = 0;
     if(now - lastPollLog >= 1000000)
     {
         lastPollLog = now;
-        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms ringUsed=%lu heap=%s",
-            (unsigned long)_tMs, (unsigned long)_ring.bytesUsed(),
+        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
+        DEBUG_INFO("[GYRO-DIAG] poll(): t=%lu ms ringUsed=%lu loopHWM=%u heap=%s",
+            (unsigned long)_tMs, (unsigned long)_ring.bytesUsed(), (unsigned)hwm,
             heap_caps_check_integrity_all(true) ? "OK" : "CORRUPT");
     }
 }
@@ -549,9 +578,73 @@ void GyroLogWriter::drainRing()
 
     // Commit everything buffered in the ring to the file. RingBuf::writeOut()
     // reads from the ring and calls FatFile::write() (a direct FatFs f_write,
-    // no newlib stdio FILE buffer). It runs on the same (loop) task as the
-    // sampler, so there is no concurrency to guard against.
+    // no newlib stdio FILE buffer). This runs on the writer task (or once from
+    // end() on the loop task), so hold _ringMutex to keep the sampler's ring
+    // appends from interleaving with the drain.
+    if(xSemaphoreTake(_ringMutex, portMAX_DELAY) != pdTRUE)
+        return;
     _ring.writeOut(_ring.bytesUsed());
+    xSemaphoreGive(_ringMutex);
+}
+
+// The writer task's main loop. It waits (with a short timeout) for the sampler
+// to append rows to the ring, then drains the ring to the file. Running this on
+// its own task -- on the other core -- is what lets the sampler hold a true
+// 1 kHz cadence: a card write takes tens of ms and would otherwise stall the
+// sampler. The timeout (rather than a pure semaphore wait) also lets the task
+// notice a stop request promptly and keeps draining any stragglers.
+void GyroLogWriter::writerTaskTrampoline(void* param)
+{
+    ((GyroLogWriter*)param)->writerTask();
+    vTaskDelete(nullptr);
+}
+
+void GyroLogWriter::writerTask()
+{
+    while(!_writerStop)
+    {
+        // Wait for the sampler to append data, or for a stop request. The 20 ms
+        // timeout bounds how long a stop request waits before the task notices it.
+        if(xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20)) == pdTRUE)
+        {
+            if(_ring.bytesUsed() > 0)
+                drainRing();
+        }
+    }
+
+    // Final drain on the way out, so no buffered rows are lost.
+    if(_ring.bytesUsed() > 0)
+        drainRing();
+}
+
+void GyroLogWriter::startWriterTask()
+{
+    if(_writerTask != nullptr)
+        return; // already running
+    _writerStop = false;
+    // 8 KB stack: the task only does a FatFile::write of a few KB, so this is
+    // ample. Priority 2 (above the default loop task) so the writer is not
+    // starved; it still preempts only briefly since it yields in the wait.
+    xTaskCreate(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
+        this, 2, &_writerTask);
+}
+
+void GyroLogWriter::stopWriterTask()
+{
+    if(_writerTask == nullptr)
+        return;
+    // Ask the writer to stop and wake it so it sees the flag promptly.
+    _writerStop = true;
+    if(_dataSem)
+        xSemaphoreGive(_dataSem);
+    // Wait for the writer task to finish its final drain and delete itself.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    // If it is still around (it should not be), delete it explicitly.
+    if(_writerTask != nullptr)
+    {
+        vTaskDelete(_writerTask);
+        _writerTask = nullptr;
+    }
 }
 
 void GyroLogWriter::closeFile()
@@ -766,9 +859,12 @@ bool GyroLogWriter::end()
     if(_state != State::Recording)
         return false;
 
-    // Final drain of any remaining samples, then close the file and commit the
-    // directory entry to the card. All on this (loop) task -- there is no
-    // separate writer task.
+    // Stop the writer task first so it no longer drains the ring concurrently.
+    // It does a final drain of any stragglers on the way out.
+    stopWriterTask();
+
+    // Final drain of any remaining samples (now on this loop task, the writer is
+    // gone), then close the file and commit the directory entry to the card.
     drainRing();
     if(_file.isOpen())
     {

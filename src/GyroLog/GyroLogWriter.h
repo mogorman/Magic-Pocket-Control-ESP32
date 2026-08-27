@@ -6,6 +6,9 @@
 #include <cstdint>
 #include "SdFat.h" // Adafruit SdFat (FatFile, SdSpiConfig)
 #include "RingBuf.h" // Adafruit SdFat RingBuf (decouples 1 kHz sampling from SD writes)
+#include <freertos/FreeRTOS.h> // TaskHandle_t / SemaphoreHandle_t (writer task)
+#include <freertos/task.h>
+#include <freertos/semphr.h>
 
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
@@ -24,6 +27,11 @@
 class GyroLogWriter
 {
 public:
+    // Destructor: stop the writer task and delete the FreeRTOS objects it uses.
+    // (The writer is a global singleton and is never actually destroyed, but this
+    // keeps the class well-behaved if it ever is.)
+    ~GyroLogWriter();
+
     // The GCSV orientation token. This must match how the MPU6886 is physically
     // mounted on the Core2. It is calibrated at runtime (see the Gyro Log
     // screen) and persisted in NVS, so it survives reboots.
@@ -139,10 +147,25 @@ private:
 
     // The ring buffer that decouples the 1 kHz IMU sampling from the SD write,
     // modeled on the Adafruit SdFat high-speed-logging pattern (TeensySdioLogger):
-    // the sampler writes GCSV rows into the RingBuf, and the drain calls
-    // writeOut() which commits the buffered bytes to the FatFile. 8 KB is enough
-    // to hold a second or more of ~30-byte rows at 1 kHz.
+    // the sampler writes GCSV rows into the RingBuf, and a drain calls writeOut()
+    // which commits the buffered bytes to the FatFile. 8 KB is enough to hold a
+    // second or more of ~30-byte rows at 1 kHz.
+    //
+    // The sampler (loop task) and the writer task both touch this ring, so all
+    // access is serialized by _ringMutex (the RingBuf's indices are not
+    // thread-safe across tasks).
     RingBuf<FatFile, 8192> _ring;
+
+    // ---- Writer task (decouples the SD write from the 1 kHz sampler) ----
+    // The sampler on the loop task only appends rows to the ring; a dedicated
+    // FreeRTOS task (on the other core) does the actual FatFile::write(). This
+    // is what lets the sampler hold a true 1 kHz cadence: a card write takes
+    // tens of ms, and if it ran on the loop task it would stall the sampler
+    // (measured: 76% capture with a same-task write vs 100% without).
+    TaskHandle_t _writerTask = nullptr;
+    SemaphoreHandle_t _ringMutex = nullptr;   // guards _ring (producer + consumer)
+    SemaphoreHandle_t _dataSem = nullptr;     // wakes the writer when rows are pending
+    volatile bool _writerStop = false;        // tells the writer task to exit
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
@@ -193,8 +216,19 @@ private:
     static const char* kNvsKeyOrientation;
 
     // Drain as much of the ring buffer as possible to the file (RingBuf::writeOut).
-    // Called from poll() (rate-limited) and once more from end() to flush the tail.
+    // Runs on the writer task (and once from end() on the loop task to flush the
+    // tail). Takes _ringMutex around the ring access.
     void drainRing();
+
+    // The writer task's main loop: wait for pending rows (or a stop request),
+    // then drain the ring to the file. Runs on its own FreeRTOS task.
+    static void writerTaskTrampoline(void* param);
+    void writerTask();
+
+    // Start / stop the writer task. startWriterTask() is called from begin();
+    // stopWriterTask() from end() (signals stop, then joins the task).
+    void startWriterTask();
+    void stopWriterTask();
 
     // Close the FatFile and commit it to the card. Safe to call when no file is open.
     void closeFile();
