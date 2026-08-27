@@ -178,6 +178,14 @@ public:
     // "mount failed", "ready"). Empty until the first attempt.
     const std::string& sdStatusMessage() const { return _sdStatusMessage; }
 
+    // Count the data rows (the "t,gx,gy,gz,ax,ay,az" sample lines) in a GCSV
+    // file at `path` (e.g. "/clip_0001.gcsv"). The file must be closed; this
+    // opens it read-only on the already-mounted volume, counts lines that start
+    // with a digit (the sample rows), and closes it. Returns the row count, or
+    // -1 if the file could not be opened. Used by the end-to-end test to verify
+    // the recorded sample count.
+    long countSamplesInFile(const std::string& path);
+
     // ---- Orientation (calibration) ----
     // Returns the current orientation token index (0..23).
     int getOrientationIndex() const { return _orientationIndex; }

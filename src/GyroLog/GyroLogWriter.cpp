@@ -850,6 +850,41 @@ void GyroLogWriter::closeFile()
     }
 }
 
+// Count the data rows in a closed GCSV file. A data row is a line whose first
+// character is a digit (the "t" sample index). Header lines ("GYROFLOW IMU
+// LOG", "version,...", "t,gx,gy,..." etc.) all start with a letter, so this
+// cleanly separates the ~N sample rows from the header. Reads the whole file
+// in chunks (it's a few hundred KB at most) and counts newlines that begin a
+// digit-leading line.
+long GyroLogWriter::countSamplesInFile(const std::string& path)
+{
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+        return -1;
+
+    long count = 0;
+    uint8_t buf[512];
+    size_t n;
+    bool lineStart = true; // are we at the start of a line?
+    while((n = f.read(buf, sizeof(buf))) > 0)
+    {
+        for(size_t i = 0; i < n; i++)
+        {
+            if(lineStart)
+            {
+                // The first byte of a line: a digit means a sample row.
+                if(buf[i] >= '0' && buf[i] <= '9')
+                    count++;
+                lineStart = false;
+            }
+            if(buf[i] == '\n')
+                lineStart = true;
+        }
+    }
+    f.close();
+    return count;
+}
+
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
 //
 // The file was written with a generic name (e.g. "clip_0001.mov") and later
