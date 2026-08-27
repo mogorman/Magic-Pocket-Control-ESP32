@@ -4453,9 +4453,13 @@ static void imuSdWriteTest()
   writerState.dataSem = dataSem;
   writerState.stop = &writerStop;
   writerState.writtenBytes = &writtenBytes;
+  // Pin the writer to core 1 so its long card writes (up to ~220 ms) run on the
+  // other core and never starve the sampler. The Arduino loop task (where this
+  // test's sampler runs) is on core 0 by default; we print its core to confirm.
   TaskHandle_t writerTask = nullptr;
-  xTaskCreate(imuTestWriterTask, "imuTestWriter", 8192, &writerState, 2, &writerTask);
-  Serial.println("writer task started (1 kHz sampler + dedicated SD writer)");
+  // ESP32 Arduino's xTaskCreatePinnedToCore: (func, name, stack, params, priority, &handle, coreID)
+  xTaskCreatePinnedToCore(imuTestWriterTask, "imuTestWriter", 8192, &writerState, 2, &writerTask, 1);
+  Serial.printf("writer task pinned to core 1; loop/sampler task is on core %d\n", (int)xPortGetCoreID());
   // Drop-rate diagnostics. At 1 kHz we expect exactly 1 sample per ms, so the
   // "expected" sample count is the elapsed time in ms. Comparing actual vs
   // expected tells us whether we're capturing a constant 1 kHz rate or missing

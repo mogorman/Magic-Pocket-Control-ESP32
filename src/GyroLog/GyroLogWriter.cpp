@@ -623,10 +623,14 @@ void GyroLogWriter::startWriterTask()
         return; // already running
     _writerStop = false;
     // 8 KB stack: the task only does a FatFile::write of a few KB, so this is
-    // ample. Priority 2 (above the default loop task) so the writer is not
-    // starved; it still preempts only briefly since it yields in the wait.
-    xTaskCreate(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
-        this, 2, &_writerTask);
+    // ample. Pinned to core 1 so its long card writes (up to ~200 ms) run on the
+    // other core and never starve the 1 kHz sampler, which runs on the loop
+    // task (core 0). Priority 2 so the writer is not starved by the sampler.
+    // Note: the ESP32 Arduino framework's xTaskCreatePinnedToCore puts the
+    // TaskHandle_t* BEFORE the core ID (unlike raw FreeRTOS), so the order is
+    // (func, name, stack, params, priority, &handle, coreID).
+    xTaskCreatePinnedToCore(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
+        this, 2, &_writerTask, 1);
 }
 
 void GyroLogWriter::stopWriterTask()
