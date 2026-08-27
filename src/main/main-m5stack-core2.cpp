@@ -4360,8 +4360,68 @@ static void imuSampleTest()
 // be >= the batch size (kMinWriteBytes) or the writer can never accumulate a full
 // batch. 8 KB is the default; bump it (e.g. 32 KB) to test larger write chunks.
 #ifndef SD_TEST_RING_SIZE
-#define SD_TEST_RING_SIZE 32768
+#define SD_TEST_RING_SIZE 98304
 #endif
+
+// A ring buffer backed by a PSRAM allocation, with the same interface the test
+// uses from SdFat's RingBuf (begin/write/writeOut/bytesUsed). SdFat's RingBuf
+// keeps its buffer in the object (internal RAM), so a large one (e.g. 96 KB for
+// 80 KB write chunks) overflows the ESP32's internal DRAM at link time. This
+// version ps_malloc's the buffer so it can be as big as the PSRAM allows.
+class PsramRing
+{
+public:
+  bool begin(FatFile* file, size_t size)
+  {
+    _file = file;
+    _size = size;
+    _buf = (uint8_t*)ps_malloc(size);
+    if(!_buf)
+      return false;
+    _head = _tail = 0;
+    return true;
+  }
+  // Append up to `count` bytes; drops (returns 0) if the ring can't hold them.
+  size_t write(const void* buf, size_t count)
+  {
+    if(freeSpace() < count)
+      return 0;
+    const uint8_t* src = (const uint8_t*)buf;
+    size_t n = count < (_size - _head) ? count : (_size - _head);
+    memcpy(_buf + _head, src, n);
+    _head = (_head + n) % _size;
+    if(n < count)
+    {
+      memcpy(_buf, src + n, count - n);
+      _head = count - n;
+    }
+    return count;
+  }
+  // Commit up to `count` buffered bytes to the file; returns bytes written.
+  size_t writeOut(size_t count)
+  {
+    size_t avail = used();
+    count = count < avail ? count : avail;
+    size_t n = count < (_size - _tail) ? count : (_size - _tail);
+    _file->write(_buf + _tail, n);
+    _tail = (_tail + n) % _size;
+    if(n < count)
+    {
+      _file->write(_buf, count - n);
+      _tail = count - n;
+    }
+    return count;
+  }
+  size_t used() const { return (_head >= _tail) ? (_head - _tail) : (_size - _tail + _head); }
+  size_t bytesUsed() const { return used(); } // alias matching SdFat RingBuf's name
+  size_t freeSpace() const { return _size - used(); }
+private:
+  FatFile* _file = nullptr;
+  uint8_t* _buf = nullptr;
+  size_t _size = 0;
+  size_t _head = 0;
+  size_t _tail = 0;
+};
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
 // main loop) appends rows to the ring; the writer task (a separate FreeRTOS
@@ -4370,7 +4430,7 @@ static void imuSampleTest()
 // the sampler's own task stalls the 1 kHz cadence.
 struct ImuTestWriterState
 {
-  RingBuf<FatFile, SD_TEST_RING_SIZE>* ring;
+  PsramRing* ring;
   SemaphoreHandle_t ringMutex;
   SemaphoreHandle_t dataSem;
   volatile bool* stop;
@@ -4391,8 +4451,12 @@ struct ImuTestWriterState
 // card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
 // has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
 // transaction rate to a few per 10 ms and gives the I2C long quiet windows.
-static const size_t kMinWriteBytes = 20 * 1024;        // write once >= 20 KB is buffered
-static const uint32_t kMaxWriteIntervalUs = 50 * 1000; // ...or at most once per 50 ms
+static const size_t kMinWriteBytes = 80 * 1024;        // write once >= 80 KB is buffered
+// The max interval is raised to 3 s so the 80 KB threshold (not the timeout) is
+// what triggers a write -- otherwise the 50 ms timeout would fire first and we'd
+// never accumulate a full 80 KB chunk. At 1 kHz (~34 B/sample) 80 KB is ~2.3 s of
+// data, so 3 s is a safe upper bound on how long a write can be deferred.
+static const uint32_t kMaxWriteIntervalUs = 3 * 1000 * 1000; // ...or at most once per 3 s
 
 static void imuTestWriterTask(void* param)
 {
@@ -4513,12 +4577,16 @@ static void imuSdWriteTest()
   Serial.println("preAllocate skipped (SD_TEST_PREALLOCATE=0)");
 #endif
 
-  // The ring buffer that decouples the 1 kHz sampling from the SD write,
-  // exactly as GyroLogWriter uses it. It's `static` because a large ring
-  // (e.g. 32 KB for 20 KB write batches) would overflow the loopTask's stack
-  // if it were a local.
-  static RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
-  ring.begin(&file);
+  // The ring buffer that decouples the 1 kHz sampling from the SD write. It's a
+  // PSRAM-backed ring (PsramRing) so it can be as large as the batch size
+  // (e.g. 96 KB for 80 KB write chunks) without overflowing the ESP32's internal
+  // DRAM at link time. `static` so it survives the function's scope.
+  static PsramRing ring;
+  if(!ring.begin(&file, SD_TEST_RING_SIZE))
+  {
+    Serial.println("PsramRing begin FAILED (ps_malloc)");
+    for(;;) delay(1000);
+  }
 
   // Write a small GCSV-style header so the file is a plausible log.
   const char* header =
