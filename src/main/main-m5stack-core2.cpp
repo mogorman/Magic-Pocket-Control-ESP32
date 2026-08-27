@@ -4307,7 +4307,7 @@ static void imuSampleTest()
 // the SD write is the culprit; if it stays low, something else on the loop task
 // (display, BLE) is the cause.
 #ifndef SD_TEST_WRITE
-#define SD_TEST_WRITE 0
+#define SD_TEST_WRITE 1
 #endif
 
 static void imuSdWriteTest()
@@ -4453,9 +4453,16 @@ static void imuSdWriteTest()
     if(now - lastDrain >= 50000 && ring.bytesUsed() >= 1024)
     {
       lastDrain = now;
-      size_t used = ring.bytesUsed();
-      writtenBytes += used;
-      ring.writeOut(used);
+      // Drain in small 1 KB chunks (same as the logger) so no single card write
+      // is large enough to stall the 1 kHz sampler for long.
+      const size_t kWriteChunk = 1024;
+      while(ring.bytesUsed() > 0)
+      {
+        size_t n = ring.bytesUsed();
+        if(n > kWriteChunk) n = kWriteChunk;
+        writtenBytes += n;
+        ring.writeOut(n);
+      }
     }
 #endif
 
