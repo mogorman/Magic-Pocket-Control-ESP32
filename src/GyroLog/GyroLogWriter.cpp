@@ -547,24 +547,11 @@ void GyroLogWriter::drainRing()
     if(!_file.isOpen())
         return;
 
-    // Commit the buffered rows to the file in small chunks. RingBuf::writeOut(n)
-    // writes at most n bytes (handling the wrap) via FatFile::write() (a direct
-    // FatFs f_write, no newlib stdio FILE buffer).
-    //
-    // We deliberately cap each writeOut() to a small chunk (1 KB) rather than
-    // flushing the whole ring in one call. A single large FatFile::write() takes
-    // tens of ms and stalls the 1 kHz sampler on this (loop) task; writing in
-    // small pieces keeps each individual card write short so the sampler's
-    // inter-sample gap stays small. (The ring is 8 KB, so this is at most ~8
-    // small writes per drain.)
-    static const size_t kWriteChunk = 1024;
-    while(_ring.bytesUsed() > 0)
-    {
-        size_t n = _ring.bytesUsed();
-        if(n > kWriteChunk)
-            n = kWriteChunk;
-        _ring.writeOut(n);
-    }
+    // Commit everything buffered in the ring to the file. RingBuf::writeOut()
+    // reads from the ring and calls FatFile::write() (a direct FatFs f_write,
+    // no newlib stdio FILE buffer). It runs on the same (loop) task as the
+    // sampler, so there is no concurrency to guard against.
+    _ring.writeOut(_ring.bytesUsed());
 }
 
 void GyroLogWriter::closeFile()
