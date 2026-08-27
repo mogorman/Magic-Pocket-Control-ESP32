@@ -5164,7 +5164,15 @@ void loop() {
       });
     }
 
-    if(static_cast<byte>(connectedScreenIndex) >= 100)
+    // While a GCSV log is being recorded, do NOT refresh the display. Each
+    // Screen_*() call ends in a full-screen pushSprite() -- an SPI transaction on
+    // the VSPI bus that the SD card shares. The camera pushes new state (timecode,
+    // remaining time, ...) constantly during a take, so without this gate the
+    // display would be re-pushed over SPI many times a second, competing with the
+    // SD writes and stalling the 1 kHz IMU sampler. The backlight is already off
+    // during a take (set in the record-start callback), so the frozen panel is
+    // invisible; we just stop driving it.
+    if(!gyroLog.isRecording() && static_cast<byte>(connectedScreenIndex) >= 100)
     {
       // Check if the initial payload has been fully received and if it was after the camera's last modified time, update the camera's modified time
       if(cameraConnection.getInitialPayloadTime() != ULONG_MAX && cameraConnection.getInitialPayloadTime() > camera->getLastModified())
