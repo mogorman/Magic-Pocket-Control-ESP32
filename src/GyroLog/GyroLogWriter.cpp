@@ -1095,6 +1095,90 @@ void GyroLogWriter::dumpFileHead(const std::string& path, size_t n)
     DEBUG_INFO("[GYRO-E2E] dumpFileHead: printed %lu bytes of '%s'", (unsigned long)total, path.c_str());
 }
 
+// Scan the "t" index of a closed GCSV file and report its health for Gyroflow.
+// A clean file has t = 0,1,2,...,N-1 (maxGap=1, no backwards steps). Dropped
+// samples show up as gaps (maxGap>1); a FIFO-overflow reset shows up as t going
+// backwards (which would corrupt Gyroflow's timeline). This is the definitive
+// check that the timeline is usable, not just that samples exist.
+void GyroLogWriter::analyzeTIndex(const std::string& path)
+{
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+    {
+        DEBUG_ERROR("[GYRO-E2E] analyzeTIndex: could not open '%s'", path.c_str());
+        return;
+    }
+
+    // Read the file line by line. For each sample row (first char a digit),
+    // parse the leading integer (the "t" value) and track first/last/maxGap and
+    // whether t ever decreases.
+    long firstT = -1;
+    long lastT = -1;
+    long prevT = -1;
+    long maxGap = 0;
+    long backwards = 0;
+    long rows = 0;
+
+    uint8_t buf[512];
+    size_t n;
+    // Accumulate the current line; a line is delimited by '\n'.
+    char line[64];
+    size_t lineLen = 0;
+    auto processLine = [&](const char* s)
+    {
+        if(s[0] < '0' || s[0] > '9')
+            return; // not a sample row (header line)
+        // Parse the leading integer.
+        long val = 0;
+        size_t i = 0;
+        while(s[i] >= '0' && s[i] <= '9')
+        {
+            val = val * 10 + (s[i] - '0');
+            i++;
+        }
+        rows++;
+        if(firstT < 0)
+            firstT = val;
+        lastT = val;
+        if(prevT >= 0)
+        {
+            long gap = val - prevT;
+            if(gap > maxGap)
+                maxGap = gap;
+            if(gap < 0)
+                backwards++;
+        }
+        prevT = val;
+    };
+
+    while((n = f.read(buf, sizeof(buf))) > 0)
+    {
+        for(size_t i = 0; i < n; i++)
+        {
+            if(buf[i] == '\n')
+            {
+                line[lineLen] = 0;
+                processLine(line);
+                lineLen = 0;
+            }
+            else if(lineLen < sizeof(line) - 1)
+            {
+                line[lineLen++] = (char)buf[i];
+            }
+        }
+    }
+    if(lineLen > 0)
+    {
+        line[lineLen] = 0;
+        processLine(line);
+    }
+    f.close();
+
+    DEBUG_INFO("[GYRO-E2E] t-index: rows=%ld first=%ld last=%ld maxGap=%ld backwards=%ld -> %s",
+        (long)rows, (long)firstT, (long)lastT, (long)maxGap, (long)backwards,
+        (backwards == 0 && maxGap <= 2) ? "OK (Gyroflow-usable)" : "DEGRADED (gaps/resets)");
+}
+
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
 //
 // The file was written with a generic name (e.g. "clip_0001.mov") and later

@@ -4483,6 +4483,10 @@ static void gyroE2ETestTick()
           // keep the log short; the structure is the same at every clock.)
           if(e2eSweepIdx == 0)
             gyroLog.dumpFileHead(path, 400);
+          // Analyze the "t" index across the whole file: report the max gap and
+          // any backwards steps (resets) so we know the timeline is Gyroflow-
+          // usable, not just that samples exist.
+          gyroLog.analyzeTIndex(path);
         }
         // After a sweep run, advance to the next I2C clock (back to state -2).
         // If we're not in a sweep (or this was the last clock), finish.

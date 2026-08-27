@@ -212,6 +212,14 @@ public:
     // the header + first sample rows are well-formed). Used by the E2E test.
     void dumpFileHead(const std::string& path, size_t n);
 
+    // Scan a closed GCSV file's "t" index and report its health for Gyroflow:
+    // the first and last t, the count of rows, the largest gap between
+    // consecutive t values (a gap = dropped samples), and whether t ever goes
+    // backwards (a reset, which would corrupt Gyroflow's timeline). A clean file
+    // has first=0, last=N-1, maxGap=1, and no backwards steps. Used by the E2E
+    // test to confirm the timeline is usable, not just that samples exist.
+    void analyzeTIndex(const std::string& path);
+
     // ---- Orientation (calibration) ----
     // Returns the current orientation token index (0..23).
     int getOrientationIndex() const { return _orientationIndex; }
