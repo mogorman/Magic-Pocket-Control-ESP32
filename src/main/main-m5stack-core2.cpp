@@ -4360,7 +4360,12 @@ static void imuSampleTest()
 // be >= the batch size (kMinWriteBytes) or the writer can never accumulate a full
 // batch. 8 KB is the default; bump it (e.g. 32 KB) to test larger write chunks.
 #ifndef SD_TEST_RING_SIZE
-#define SD_TEST_RING_SIZE 98304
+#define SD_TEST_RING_SIZE 262144
+#endif
+// How long (seconds) the no-write (SD_TEST_WRITE=0) variant of the test runs.
+// Bumped to 30 s for the 240 KB chunk test so a few full batches complete.
+#ifndef SD_TEST_DURATION_S
+#define SD_TEST_DURATION_S 30
 #endif
 
 // A ring buffer backed by a PSRAM allocation, with the same interface the test
@@ -4451,12 +4456,12 @@ struct ImuTestWriterState
 // card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
 // has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
 // transaction rate to a few per 10 ms and gives the I2C long quiet windows.
-static const size_t kMinWriteBytes = 80 * 1024;        // write once >= 80 KB is buffered
+static const size_t kMinWriteBytes = 240 * 1024;      // write once >= 240 KB is buffered
 // The max interval is raised to 3 s so the 80 KB threshold (not the timeout) is
 // what triggers a write -- otherwise the 50 ms timeout would fire first and we'd
 // never accumulate a full 80 KB chunk. At 1 kHz (~34 B/sample) 80 KB is ~2.3 s of
 // data, so 3 s is a safe upper bound on how long a write can be deferred.
-static const uint32_t kMaxWriteIntervalUs = 3 * 1000 * 1000; // ...or at most once per 3 s
+static const uint32_t kMaxWriteIntervalUs = 8 * 1000 * 1000; // ...or at most once per 8 s
 
 static void imuTestWriterTask(void* param)
 {
@@ -4785,12 +4790,12 @@ static void imuSdWriteTest()
     }
 
     // Stop once we've written the target number of bytes (or, when not writing
-    // to the card, after a fixed 15 s so we get a stable capture-rate reading).
+    // to the card, after a fixed duration so we get a stable capture-rate reading).
 #if SD_TEST_WRITE
     if(writtenBytes >= kTarget)
       break;
 #else
-    if(now - start >= 15000000)
+    if(now - start >= (uint32_t)SD_TEST_DURATION_S * 1000000UL)
       break;
 #endif
   }
