@@ -1125,30 +1125,11 @@ void GyroLogWriter::samplerTask()
         }
 
         // Read the latest sample exactly on the boundary and append one dense row.
-        uint32_t tRead0 = micros();
         pollOutputRegisters();
-        uint32_t readUs = micros() - tRead0;
 
-        // [DIAG] Once per second, report the sampler's actual loop rate and the
-        // average I2C read time, to confirm the grid-pinned cadence holds ~1 kHz.
-        {
-            static uint32_t dLast = 0;
-            static uint32_t dLoops = 0, dReadUs = 0;
-            dLoops++;
-            dReadUs += readUs;
-            uint32_t now = millis();
-            if(dLast == 0) dLast = now;
-            if(now - dLast >= 1000)
-            {
-                DEBUG_INFO("[GYRO-DIAG] sampler: %lu loops/s (want ~1000), avg I2C read %lu us",
-                    (unsigned long)dLoops, (unsigned long)(dLoops ? dReadUs / dLoops : 0));
-                dLast = now; dLoops = 0; dReadUs = 0;
-            }
-        }
-
-        // Advance to the next 1 ms boundary. If the read finished early (it always
-        // does, ~0.4-0.6 ms < 1 ms), we have slack; yield a tick so the writer can
-        // commit the ring, then the spin above waits out the rest of the interval.
+        // Advance to the next 1 ms boundary. The read finished early (~0.4-0.6 ms
+        // < 1 ms), so we have slack; yield a tick so the writer can commit the
+        // ring, then the spin above waits out the rest of the interval.
         nextBoundaryUs += 1000;
         vTaskDelay(1);
     }
