@@ -5598,7 +5598,14 @@ void loop() {
   btnAPressed = false;
   btnBPressed = false;
 
-  M5.update();
+  // M5Unified's update() polls connected units over the shared I2C bus. While a
+  // GCSV recording is running, the 1 kHz sampler (on the other core) owns that bus
+  // for its per-ms I2C reads; M5Unified's polling contends with it and causes
+  // occasional multi-ms I2C stalls that cost samples. So we skip M5.update() while
+  // recording. Button/touch state is still read directly below (M5.BtnA.wasPressed
+  // etc. read the GPIO/touch, not I2C), so the UI stays responsive.
+  if(!gyroLog.isRecording())
+    M5.update();
 
   if(M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed())
   {
