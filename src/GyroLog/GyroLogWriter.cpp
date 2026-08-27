@@ -1116,16 +1116,41 @@ void GyroLogWriter::samplerTask()
             nextBoundaryUs = ((now / 1000) + 1) * 1000;
         }
 
-        // Spin (microsecond-accurate) until the next 1 ms boundary. We yield a
-        // tick each pass so the writer (lower priority, same core) gets scheduled;
-        // the spin is short (<=1 ms) so this is cheap and stays on the grid.
+        // Wait until the next 1 ms boundary using a TIGHT spin on the microsecond
+        // timer (no vTaskDelay in the wait -- a vTaskDelay(1) can overshoot the
+        // boundary by up to a full tick because it wakes on the next tick, which
+        // is what made the read start late and cost us ~6% of the samples). A pure
+        // spin is microsecond-accurate. We only yield to the writer AFTER the read
+        // (in the slack), so the wait itself never deschedules us.
         while(esp_timer_get_time() < nextBoundaryUs)
         {
-            vTaskDelay(1);
+            // tight spin; portYIELD() lets same-priority tasks run but does NOT
+            // sleep, so we stay pinned to the boundary.
+            portYIELD();
         }
 
         // Read the latest sample exactly on the boundary and append one dense row.
+        uint32_t tRead0 = micros();
         pollOutputRegisters();
+        uint32_t readUs = micros() - tRead0;
+
+        // [DIAG] Once per second, report the loop rate and the I2C read time
+        // distribution, to see how close to 1 kHz we are and where time goes.
+        {
+            static uint32_t dLast = 0;
+            static uint32_t dLoops = 0, dReadUs = 0, dMaxRead = 0;
+            dLoops++;
+            dReadUs += readUs;
+            if(readUs > dMaxRead) dMaxRead = readUs;
+            uint32_t now = millis();
+            if(dLast == 0) dLast = now;
+            if(now - dLast >= 1000)
+            {
+                DEBUG_INFO("[GYRO-DIAG] sampler: %lu loops/s (want ~1000), avg I2C read %lu us, max %lu us",
+                    (unsigned long)dLoops, (unsigned long)(dLoops ? dReadUs / dLoops : 0), (unsigned long)dMaxRead);
+                dLast = now; dLoops = 0; dReadUs = 0; dMaxRead = 0;
+            }
+        }
 
         // Advance to the next 1 ms boundary. The read finished early (~0.4-0.6 ms
         // < 1 ms), so we have slack; yield a tick so the writer can commit the
