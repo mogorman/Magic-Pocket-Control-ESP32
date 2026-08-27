@@ -616,6 +616,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _fifoOverflows = 0;
 
     _state = State::Recording;
+    // Wake the (persistent) writer task so it sees the new state and starts
+    // committing the ring. The sampler task polls _state itself (5 ms) so it
+    // needs no explicit wake.
+    if(_dataSem)
+        xSemaphoreGive(_dataSem);
     return true;
 }
 
@@ -840,18 +845,22 @@ void GyroLogWriter::drainRing()
 void GyroLogWriter::writerTaskTrampoline(void* param)
 {
     ((GyroLogWriter*)param)->writerTask();
-    // Do NOT self-delete: stopWriterTask() calls vTaskDelete(_writerTask) exactly
-    // once. Self-deleting here too would make that call hit a stale handle and
-    // crash (LoadProhibited in vTaskDelete). Block until the teardown deletes us.
-    for(;;)
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    // The task is persistent: writerTask() loops forever and never returns.
 }
 
 void GyroLogWriter::writerTask()
 {
     _lastWriteMicros = micros();
-    while(!_writerStop)
+    for(;;)
     {
+        // Not recording: sleep on the semaphore (woken by begin()/end() giving
+        // it, or by the 20 ms timeout). This is the idle state between clips.
+        if(_state != State::Recording)
+        {
+            xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20));
+            continue;
+        }
+
         // Wait for the sampler to append data, or for the poll timeout. The 20 ms
         // timeout keeps the stop/interval checks responsive without busy-spinning.
         if(xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20)) != pdTRUE)
@@ -876,10 +885,6 @@ void GyroLogWriter::writerTask()
         drainRing();
         _lastWriteMicros = micros();
     }
-
-    // Final drain on the way out, so no buffered rows are lost.
-    if(_ring.bytesUsed() > 0)
-        drainRing();
 }
 
 void GyroLogWriter::startWriterTask()
@@ -900,36 +905,27 @@ void GyroLogWriter::startWriterTask()
 
 void GyroLogWriter::stopWriterTask()
 {
-    if(_writerTask == nullptr)
-        return;
-    // Ask the writer to stop and wake it so it sees the flag promptly.
-    _writerStop = true;
+    // The writer task is persistent -- we don't delete it. We just wake it (give
+    // _dataSem) so it notices _state != Recording (set by end()) and returns to
+    // its idle sleep. The final ring drain is done by end() directly (drainRing),
+    // so no data is lost.
     if(_dataSem)
         xSemaphoreGive(_dataSem);
-    // Give the writer a moment to notice the stop, do its final drain, and reach
-    // its blocking loop. Then delete it exactly once (it does not self-delete).
-    vTaskDelay(pdMS_TO_TICKS(100));
-    if(_writerTask != nullptr)
-    {
-        vTaskDelete(_writerTask);
-        _writerTask = nullptr;
-    }
 }
 
-// The sampler task's main loop. It drains the MPU6886 FIFO in a TIGHT loop,
-// exactly like the standalone test that held a clean ~2.8 kHz: drain whatever is
-// in the FIFO, then immediately re-poll. When the FIFO is empty, drainFifoOnce()
-// does only a 2-byte count read and returns fast, so the loop spins cheaply and
-// the FIFO paces us (no fixed delay -- a delay is what let the FIFO fall behind
-// and lose samples). This runs on its own high-priority task so it preempts the
-// main loop's UI work to drain the FIFO promptly.
+// The sampler task's main loop. It is PERSISTENT (created once, never deleted)
+// so we don't churn the tight internal heap with a 4 KB alloc/free per recording
+// (that fragmentation made the 2nd recording's xTaskCreate fail). When not
+// recording it sleeps; when a recording starts (begin() sets _state=Recording) it
+// wakes and drains the FIFO in a TIGHT loop -- drain whatever is in the FIFO,
+// then immediately re-poll. When the FIFO is empty, drainFifoOnce() does only a
+// 2-byte count read and returns fast, so the loop spins cheaply and the FIFO
+// paces us (no fixed delay -- a delay is what let the FIFO fall behind and lose
+// samples).
 void GyroLogWriter::samplerTaskTrampoline(void* param)
 {
     ((GyroLogWriter*)param)->samplerTask();
-    // Do NOT self-delete: stopSamplerTask() calls vTaskDelete(_samplerTask)
-    // exactly once. Block until the teardown deletes us.
-    for(;;)
-        vTaskDelay(pdMS_TO_TICKS(1000));
+    // The task is persistent: it never returns. (samplerTask() loops forever.)
 }
 
 void GyroLogWriter::samplerTask()
@@ -942,8 +938,18 @@ void GyroLogWriter::samplerTask()
     // the brief writer preemptions.
     const uint32_t kYieldEvery = 20;
     uint32_t drainsSinceYield = 0;
-    while(!_samplerStop)
+    for(;;)
     {
+        // Not recording: poll _state every ~5 ms (cheap) until a recording
+        // starts. We don't block on a semaphore here because _dataSem is shared
+        // with the writer task; a short poll is simpler and the 5 ms wake latency
+        // is fine (a recording start is a deliberate user action).
+        if(_state != State::Recording)
+        {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
         // Drain everything currently in the FIFO. drainFifoOnce() reads the count
         // and, if there's data, reads it out and appends rows to the ring (waking
         // the writer task). When the FIFO is empty it just does a 2-byte count
@@ -956,18 +962,12 @@ void GyroLogWriter::samplerTask()
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
-
-    // Final drain on the way out: pull any remaining FIFO packets into the ring so
-    // the very end of the clip is captured before the writer flushes the ring to
-    // the card. This is the "flush everything out" the user asked for on stop.
-    drainFifoOnce();
 }
 
 void GyroLogWriter::startSamplerTask()
 {
     if(_samplerTask != nullptr)
-        return; // already running
-    _samplerStop = false;
+        return; // already created (persistent task)
     // 4 KB stack: the task only does a small I2C read and a ring append, so
     // this is ample. Pinned to CORE 0 at priority 5.
     //
@@ -988,23 +988,18 @@ void GyroLogWriter::startSamplerTask()
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5, persistent)");
 }
 
 void GyroLogWriter::stopSamplerTask()
 {
-    if(_samplerTask == nullptr)
-        return;
-    // Ask the sampler to stop. It will do a final FIFO drain (see samplerTask())
-    // and then exit its loop; the trampoline blocks until we delete it below.
-    _samplerStop = true;
-    // Give it a moment to finish its final drain, then delete it exactly once.
-    vTaskDelay(pdMS_TO_TICKS(50));
-    if(_samplerTask != nullptr)
-    {
-        vTaskDelete(_samplerTask);
-        _samplerTask = nullptr;
-    }
+    // The sampler task is persistent -- we don't delete it. We just make it sleep
+    // by clearing the recording state (done in end()) and wake it so it notices.
+    // We do a final FIFO drain here (on the calling task) to flush the very end
+    // of the clip into the ring before the writer commits it.
+    drainFifoOnce();
+    if(_dataSem)
+        xSemaphoreGive(_dataSem); // wake the sampler so it sees _state != Recording
 }
 
 void GyroLogWriter::closeFile()
@@ -1290,28 +1285,26 @@ bool GyroLogWriter::end()
         return false;
 
     // [DIAG] Timestamp each step of end() to find where a long block happens.
-    // (The 100 s "ended log" delay after a record stop points at a blocking call
-    // in this function or its caller.)
     uint32_t tEnter = micros();
     DEBUG_INFO("[GYRO-DIAG] end(): ENTER (t=%lu us)", (unsigned long)tEnter);
 
-    // Stop the SAMPLER task first. It does a final drain of the MPU6886 FIFO on
-    // the way out, so the very last samples get into the ring before we stop.
-    // (It must stop before the writer so no new rows are appended while the
-    // writer is doing its final flush.)
-    stopSamplerTask();
+    // The sampler and writer tasks are PERSISTENT (created once, never deleted).
+    // To stop recording we (1) flip _state to Idle so both tasks return to their
+    // idle sleep, (2) do a final FIFO drain on this thread to capture the very
+    // last samples, and (3) drain the ring to the file. No task is deleted, so
+    // we don't churn the tight internal heap (the per-recording task create/
+    // delete was fragmenting the heap and making the 2nd recording's xTaskCreate
+    // fail).
+    _state = State::Idle; // both tasks see this and stop working / go to sleep
+    stopSamplerTask();     // final FIFO drain + wake the sampler so it sleeps
     DEBUG_INFO("[GYRO-DIAG] end(): stopSamplerTask took %lu us", (unsigned long)(micros() - tEnter));
     tEnter = micros();
-
-    // Stop the writer task. It does a final drain of the ring to the file on the
-    // way out, so everything buffered (including the sampler's final FIFO drain)
-    // is committed to the card.
-    stopWriterTask();
+    stopWriterTask();       // wake the writer so it returns to idle sleep
     DEBUG_INFO("[GYRO-DIAG] end(): stopWriterTask took %lu us", (unsigned long)(micros() - tEnter));
     tEnter = micros();
 
-    // Belt-and-braces final drain of any ring stragglers (now on this loop task,
-    // both tasks are gone), then close the file and commit the directory entry.
+    // Final drain of any ring stragglers (both tasks are idle now), then close
+    // the file and commit the directory entry.
     drainRing();
     DEBUG_INFO("[GYRO-DIAG] end(): drainRing took %lu us", (unsigned long)(micros() - tEnter));
     tEnter = micros();
