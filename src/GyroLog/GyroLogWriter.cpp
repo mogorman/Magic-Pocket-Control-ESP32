@@ -612,28 +612,29 @@ uint32_t GyroLogWriter::drainFifoOnce()
         return 0;
     }
 
-    // Drain the FIFO in 512-byte chunks. Each chunk is ONE I2C transaction
-    // (pointer->0x2C, then read up to 512 bytes), which is far cheaper than
-    // reading 14-byte packets one at a time. 512 bytes = 36 full 14-byte packets.
-    // Each drained packet becomes one GCSV row; the "t" field is the running
+    // Drain the FIFO with a SINGLE bulk I2C read of exactly `fifoBytes` bytes
+    // (capped at the 1 KB FIFO size). We know the exact byte count from the count
+    // register we just read, so we can pull it all in one transaction -- this
+    // halves the I2C start/stop/restart overhead versus reading in 512-byte chunks,
+    // which is what lets us keep up with the sensor's ~3.8 kHz rate. Reading
+    // exactly the buffered count (not more) avoids the FIFO's circular-buffer
+    // wraparound returning stale data.
+    //
+    // Each 14-byte packet becomes one GCSV row; the "t" field is the running
     // packet index (_fifoSeq), so the stream stays gap-free and correctly spaced
     // even when we drain a burst of samples after a stall.
     uint32_t drained = 0;
     bool appended = false;
-    uint32_t tData = micros();
     uint32_t dataUs = 0;
-    while(fifoBytes >= 14)
     {
-        uint32_t availPkts = fifoBytes / 14;
-        uint32_t pktsThisTx = (availPkts > 36) ? 36 : availPkts;
-        size_t chunk = (size_t)pktsThisTx * 14;
+        size_t chunk = (size_t)fifoBytes; // exact buffered count, <= 1024
         uint32_t tRead = micros();
         if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, i2cHz))
-            break; // I2C read failed; stop draining this pass
-        dataUs += micros() - tRead;
-        fifoBytes -= (uint16_t)chunk;
+            chunk = 0; // I2C read failed; nothing drained this pass
+        dataUs = micros() - tRead;
 
-        for(size_t p = 0; p < chunk; p += 14)
+        size_t fullPackets = chunk / 14;
+        for(size_t p = 0; p < fullPackets * 14; p += 14)
         {
             // FIFO packet layout (gyro+accel enabled): accel 6 bytes
             // (buf[0..5]), temp 2 bytes (buf[6..7]), gyro 6 bytes (buf[8..13]).

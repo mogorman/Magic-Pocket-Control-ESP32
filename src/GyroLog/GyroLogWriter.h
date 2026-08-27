@@ -317,7 +317,7 @@ private:
     // (measured at begin()) tells Gyroflow the real seconds-per-sample, so it
     // resamples to the video rate correctly.
     uint32_t _fifoSeq = 0;          // running packet index (the GCSV "t" value)
-    uint8_t _fifoBuf[512];          // scratch for a FIFO read chunk (up to 36 packets)
+    uint8_t _fifoBuf[1024];         // scratch for a FIFO read (up to the full 1 KB FIFO = 73 packets)
     float _tscale = 0.001f;         // measured seconds-per-sample (written to the header)
     bool _fifoConfigured = false;  // true once begin() set up the FIFO
 
