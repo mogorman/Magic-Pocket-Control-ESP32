@@ -4365,7 +4365,7 @@ static void imuSampleTest()
 //   3 = done (reported)
 // Start at -2 to sweep the I2C clock (find the reliability/throughput sweet spot),
 // or 0 to just run the record test at the default clock.
-static int e2eState = -2;
+static int e2eState = 0;
 static uint32_t e2eStartMs = 0;   // millis() when the record start was queued
 static std::string e2eClipName;  // the clip name we started (to find the file)
 // I2C clock values to sweep (Hz). We look for the fastest clock that still gives
