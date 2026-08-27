@@ -4349,6 +4349,13 @@ static void imuSampleTest()
 #ifndef SD_TEST_WRITER
 #define SD_TEST_WRITER 1
 #endif
+// The SPI clock (MHz) for the SD card. 4 MHz is the known-working default on
+// this shared VSPI bus (40 MHz timed out). Bumping it (e.g. 20) shortens each
+// SPI transaction, which may reduce how long a card stall holds the bus and
+// disrupts the I2C IMU read on the other core.
+#ifndef SD_TEST_SCK_MHZ
+#define SD_TEST_SCK_MHZ 20
+#endif
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
 // main loop) appends rows to the ring; the writer task (a separate FreeRTOS
@@ -4468,9 +4475,9 @@ static void imuSdWriteTest()
   // SdFat only do beginTransaction/endTransaction on it.
   SPI.begin();
   SdFat sd;
-  // 4 MHz SCK (matches the Arduino SD lib's working default). 40 MHz timed out
-  // on this shared VSPI bus.
-  if(!sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4))))
+  // SCK from SD_TEST_SCK_MHZ (default 4 MHz, the known-working value on this
+  // shared VSPI bus; 40 MHz timed out). Bump it to test faster card writes.
+  if(!sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(SD_TEST_SCK_MHZ))))
   {
     // Print the full SdFat error so we can see WHY the mount failed: the card
     // type (0 = not detected), the SD error code + data, and the volume fatType.
@@ -4481,7 +4488,7 @@ static void imuSdWriteTest()
       (int)sd.fatType());
     for(;;) delay(1000);
   }
-  Serial.printf("SdFat mounted. fatType=%d cardType=%d\n", (int)sd.fatType(), (int)sd.card()->type());
+  Serial.printf("SdFat mounted. fatType=%d cardType=%d SCK=%d MHz\n", (int)sd.fatType(), (int)sd.card()->type(), SD_TEST_SCK_MHZ);
 
   const char* path = "/imutest.gcsv";
   FatFile file;
@@ -4743,7 +4750,7 @@ static void imuSdWriteTest()
   // Commit the directory entry to the card (unmount + remount).
   sd.end();
   SPI.begin();
-  sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(4)));
+  sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(SD_TEST_SCK_MHZ)));
   vSemaphoreDelete(ringMutex);
   vSemaphoreDelete(dataSem);
 #else
