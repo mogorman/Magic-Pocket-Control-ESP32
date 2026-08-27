@@ -166,6 +166,14 @@ private:
     SemaphoreHandle_t _ringMutex = nullptr;   // guards _ring (producer + consumer)
     SemaphoreHandle_t _dataSem = nullptr;     // wakes the writer when rows are pending
     volatile bool _writerStop = false;        // tells the writer task to exit
+    uint32_t _lastWriteMicros = 0;           // micros() of the writer's last card write (batch rate-limit)
+
+    // Writer batch policy: only commit to the card once a decent chunk is
+    // buffered (kMinWriteBytes) or a max interval has passed (kMaxWriteIntervalUs).
+    // This keeps the SPI transaction rate low (a few per 10 ms instead of ~1000/
+    // s), which is what lets the I2C IMU read on the other core stay undisturbed.
+    static const size_t kMinWriteBytes = 4 * 1024;
+    static const uint32_t kMaxWriteIntervalUs = 50 * 1000;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;

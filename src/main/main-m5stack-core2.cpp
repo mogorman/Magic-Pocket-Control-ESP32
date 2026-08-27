@@ -4347,7 +4347,7 @@ static void imuSampleTest()
 // write). Used to isolate whether the act of writing to the card (SPI) -- vs
 // merely having the writer task scheduled -- is what preempts the sampler.
 #ifndef SD_TEST_WRITER
-#define SD_TEST_WRITER 0
+#define SD_TEST_WRITER 1
 #endif
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
@@ -4364,26 +4364,54 @@ struct ImuTestWriterState
   volatile uint64_t* writtenBytes;
 };
 
+// The writer task's drain policy. Instead of writing to the card on every
+// sampler wake (1 kHz -> ~1000 tiny SPI transactions/second, which is what
+// disturbs the I2C IMU read on the other core), we BATCH: only commit to the
+// card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
+// has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
+// transaction rate to a few per 10 ms and gives the I2C long quiet windows.
+static const size_t kMinWriteBytes = 4 * 1024;        // write once >= 4 KB is buffered
+static const uint32_t kMaxWriteIntervalUs = 50 * 1000; // ...or at most once per 50 ms
+
 static void imuTestWriterTask(void* param)
 {
   ImuTestWriterState* s = (ImuTestWriterState*)param;
+  uint32_t lastWrite = micros();
   for(;;)
   {
     if(*s->stop)
       break;
-    if(xSemaphoreTake(s->dataSem, pdMS_TO_TICKS(20)) == pdTRUE)
+    // Wait for the sampler to append data, or for the max write interval to
+    // elapse (whichever first). The 20 ms poll keeps the stop/interval checks
+    // responsive without busy-spinning.
+    if(xSemaphoreTake(s->dataSem, pdMS_TO_TICKS(20)) != pdTRUE)
+      continue;
+
+    // Decide whether to write now: a big enough chunk is buffered, or we've
+    // waited the max interval since the last write (so a slow trickle still
+    // gets flushed).
+    uint32_t now = micros();
+    size_t used;
     {
-      if(s->ring->bytesUsed() > 0)
-      {
-        if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) == pdTRUE)
-        {
-          size_t used = s->ring->bytesUsed();
-          s->ring->writeOut(used);
-          *s->writtenBytes += used;
-          xSemaphoreGive(s->ringMutex);
-        }
-      }
+      if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) != pdTRUE)
+        continue;
+      used = s->ring->bytesUsed();
+      xSemaphoreGive(s->ringMutex);
     }
+    bool bigEnough = (used >= kMinWriteBytes);
+    bool intervalElapsed = (now - lastWrite >= kMaxWriteIntervalUs);
+    if(!bigEnough && !intervalElapsed)
+      continue; // not yet; leave the data in the ring and keep waiting
+
+    // Commit the whole buffered chunk to the card in one writeOut().
+    if(xSemaphoreTake(s->ringMutex, portMAX_DELAY) == pdTRUE)
+    {
+      size_t toWrite = s->ring->bytesUsed();
+      s->ring->writeOut(toWrite);
+      *s->writtenBytes += toWrite;
+      xSemaphoreGive(s->ringMutex);
+    }
+    lastWrite = micros();
   }
   // Final drain on the way out, so no buffered rows are lost.
   if(s->ring->bytesUsed() > 0)

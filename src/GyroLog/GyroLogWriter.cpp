@@ -601,15 +601,32 @@ void GyroLogWriter::writerTaskTrampoline(void* param)
 
 void GyroLogWriter::writerTask()
 {
+    _lastWriteMicros = micros();
     while(!_writerStop)
     {
-        // Wait for the sampler to append data, or for a stop request. The 20 ms
-        // timeout bounds how long a stop request waits before the task notices it.
-        if(xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20)) == pdTRUE)
-        {
-            if(_ring.bytesUsed() > 0)
-                drainRing();
-        }
+        // Wait for the sampler to append data, or for the poll timeout. The 20 ms
+        // timeout keeps the stop/interval checks responsive without busy-spinning.
+        if(xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20)) != pdTRUE)
+            continue;
+
+        // Decide whether to write now: a big enough chunk is buffered, or we've
+        // waited the max interval since the last write (so a slow trickle still
+        // gets flushed). This batches the SPI transactions so they don't disturb
+        // the I2C IMU read on the other core.
+        uint32_t now = micros();
+        size_t used;
+        if(xSemaphoreTake(_ringMutex, portMAX_DELAY) != pdTRUE)
+            continue;
+        used = _ring.bytesUsed();
+        xSemaphoreGive(_ringMutex);
+
+        bool bigEnough = (used >= kMinWriteBytes);
+        bool intervalElapsed = (now - _lastWriteMicros >= kMaxWriteIntervalUs);
+        if(!bigEnough && !intervalElapsed)
+            continue; // not yet; leave the data in the ring and keep waiting
+
+        drainRing();
+        _lastWriteMicros = micros();
     }
 
     // Final drain on the way out, so no buffered rows are lost.
