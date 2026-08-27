@@ -197,6 +197,10 @@ public:
     // the recorded sample count.
     long countSamplesInFile(const std::string& path);
 
+    // Dump the first `n` bytes of a GCSV file to the debug log (for verifying
+    // the header + first sample rows are well-formed). Used by the E2E test.
+    void dumpFileHead(const std::string& path, size_t n);
+
     // ---- Orientation (calibration) ----
     // Returns the current orientation token index (0..23).
     int getOrientationIndex() const { return _orientationIndex; }

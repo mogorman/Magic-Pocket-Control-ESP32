@@ -4446,6 +4446,10 @@ static void gyroE2ETestTick()
           if(!ok)
             DEBUG_ERROR("[GYRO-E2E] FAIL: recorded %ld samples is not within 20%% of expected %ld (lost %ld samples?)",
               (long)samples, (long)expected, (long)expected - (long)samples);
+
+          // Dump the file head (header + first few sample rows) to confirm the
+          // GCSV is well-formed for Gyroflow.
+          gyroLog.dumpFileHead(path, 400);
         }
         e2eState = 3;
       }

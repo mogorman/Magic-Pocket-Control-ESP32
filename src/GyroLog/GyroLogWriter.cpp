@@ -1044,6 +1044,43 @@ long GyroLogWriter::countSamplesInFile(const std::string& path)
     return count;
 }
 
+// Dump the first n bytes of a file to the debug log in small chunks, so we can
+// confirm the GCSV header and first sample rows are well-formed.
+void GyroLogWriter::dumpFileHead(const std::string& path, size_t n)
+{
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+    {
+        DEBUG_ERROR("[GYRO-E2E] dumpFileHead: could not open '%s'", path.c_str());
+        return;
+    }
+    char line[192];
+    size_t total = 0;
+    int c;
+    size_t lineLen = 0;
+    while(total < n && (c = f.read()) != -1)
+    {
+        if(c == '\n')
+        {
+            line[lineLen] = 0;
+            DEBUG_INFO("[GYRO-E2E]   |%s", line);
+            lineLen = 0;
+        }
+        else if(lineLen < sizeof(line) - 1)
+        {
+            line[lineLen++] = (char)c;
+        }
+        total++;
+    }
+    if(lineLen > 0)
+    {
+        line[lineLen] = 0;
+        DEBUG_INFO("[GYRO-E2E]   |%s", line);
+    }
+    f.close();
+    DEBUG_INFO("[GYRO-E2E] dumpFileHead: printed %lu bytes of '%s'", (unsigned long)total, path.c_str());
+}
+
 // Rewrite the "videofilename" header line of a *closed* .gcsv file in place.
 //
 // The file was written with a generic name (e.g. "clip_0001.mov") and later
