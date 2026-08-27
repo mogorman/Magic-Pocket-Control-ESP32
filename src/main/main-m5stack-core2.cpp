@@ -4459,7 +4459,8 @@ static void imuSdWriteTest()
   TaskHandle_t writerTask = nullptr;
   // ESP32 Arduino's xTaskCreatePinnedToCore: (func, name, stack, params, priority, &handle, coreID)
   xTaskCreatePinnedToCore(imuTestWriterTask, "imuTestWriter", 8192, &writerState, 2, &writerTask, 0);
-  Serial.printf("writer task pinned to core 0; loop/sampler task is on core %d\n", (int)xPortGetCoreID());
+  Serial.printf("writer task pinned to core 0; loop/sampler task is on core %d\n",
+    (int)xPortGetCoreID());
   // Drop-rate diagnostics. At 1 kHz we expect exactly 1 sample per ms, so the
   // "expected" sample count is the elapsed time in ms. Comparing actual vs
   // expected tells us whether we're capturing a constant 1 kHz rate or missing
@@ -4470,11 +4471,24 @@ static void imuSdWriteTest()
   uint32_t maxI2cDurUs = 0;      // longest single I2C read (preemption during the read?)
   uint32_t maxHeapCheckUs = 0;  // longest once-per-second heap integrity check
   uint32_t maxSerialUs = 0;     // longest once-per-second Serial.printf
+  uint32_t lastIter = 0;        // micros() at the previous loop iteration (loop-period tracking)
+  uint32_t maxIterUs = 0;       // longest gap between consecutive loop iterations
 
   Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
   for(;;)
   {
     uint32_t now = micros();
+
+    // [DIAG] Loop period: time since the previous iteration. If the loop is
+    // spinning freely this is tiny (the gate below throttles it); a large value
+    // means the loop task was preempted between iterations.
+    if(lastIter)
+    {
+      uint32_t iter = now - lastIter;
+      if(iter > maxIterUs)
+        maxIterUs = iter;
+    }
+    lastIter = now;
 
     // Sample at ~1 kHz (same gate as the logger).
     if(now - lastSample < 1000)
@@ -4629,8 +4643,8 @@ static void imuSdWriteTest()
   Serial.printf("\nIMU SD WRITE TEST done (write=%d): %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
     SD_TEST_WRITE, (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
     (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
-  Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us\n",
-    (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs);
+  Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us  maxIter(loop period)=%lu us\n",
+    (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs, (unsigned long)maxIterUs);
 #if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
