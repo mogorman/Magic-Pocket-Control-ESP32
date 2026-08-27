@@ -4514,8 +4514,10 @@ static void imuSdWriteTest()
 #endif
 
   // The ring buffer that decouples the 1 kHz sampling from the SD write,
-  // exactly as GyroLogWriter uses it.
-  RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
+  // exactly as GyroLogWriter uses it. It's `static` because a large ring
+  // (e.g. 32 KB for 20 KB write batches) would overflow the loopTask's stack
+  // if it were a local.
+  static RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
   ring.begin(&file);
 
   // Write a small GCSV-style header so the file is a plausible log.
