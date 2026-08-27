@@ -926,6 +926,14 @@ void GyroLogWriter::samplerTaskTrampoline(void* param)
 
 void GyroLogWriter::samplerTask()
 {
+    // We drain the FIFO back-to-back (no yield) to maximize I2C throughput -- the
+    // sensor's ~3.8 kHz FIFO fill rate is right at the I2C bus limit, so any
+    // yield we insert costs captured samples. But the writer task (same core,
+    // lower priority) needs to be scheduled occasionally to commit the ring to the
+    // card, so we yield 1 tick every kYieldEvery drains. The 128 KB ring absorbs
+    // the brief writer preemptions.
+    const uint32_t kYieldEvery = 20;
+    uint32_t drainsSinceYield = 0;
     while(!_samplerStop)
     {
         // Drain everything currently in the FIFO. drainFifoOnce() reads the count
@@ -934,13 +942,11 @@ void GyroLogWriter::samplerTask()
         // read and returns 0.
         drainFifoOnce();
 
-        // Yield one tick after every drain pass. This lets the writer task (same
-        // core, lower priority) get scheduled to commit the ring to the card, and
-        // keeps the sampler from monopolizing the core. At the sensor's ~3.8 kHz
-        // the FIFO gains ~4 packets per 1 ms, so a 1-tick (~1 ms) yield between
-        // drains still keeps the FIFO shallow (we drain ~4 packets per pass, well
-        // under the 73-packet buffer) and the 128 KB ring absorbs any jitter.
-        vTaskDelay(pdMS_TO_TICKS(1));
+        if(++drainsSinceYield >= kYieldEvery)
+        {
+            drainsSinceYield = 0;
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     // Final drain on the way out: pull any remaining FIFO packets into the ring so
