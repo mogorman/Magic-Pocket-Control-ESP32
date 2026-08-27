@@ -4463,6 +4463,9 @@ static void imuSdWriteTest()
   // well over 1 ms means the loop was stalled, not that the sensor dropped).
   uint32_t lastSampleTime = 0;   // micros() of the previous sample (for gap tracking)
   uint32_t maxGapUs = 0;         // largest inter-sample gap seen so far
+  uint32_t maxI2cDurUs = 0;      // longest single I2C read (preemption during the read?)
+  uint32_t maxHeapCheckUs = 0;  // longest once-per-second heap integrity check
+  uint32_t maxSerialUs = 0;     // longest once-per-second Serial.printf
 
   Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
   for(;;)
@@ -4475,12 +4478,19 @@ static void imuSdWriteTest()
     lastSample = now;
 
     // Read the IMU directly (14-byte burst at 400 kHz), as readImu() does.
+    // [DIAG] Time the I2C read: a read that takes far longer than its ~200 us
+    // budget means the loop task was preempted *during* the read (or the bus
+    // was held), which would stall the sampler.
+    uint32_t tI2cStart = micros();
     uint8_t buf[14];
     if(!M5.In_I2C.readRegister(0x68, 0x3B, buf, 14, 400000))
     {
       i2cFails++;
       continue;
     }
+    uint32_t i2cDur = micros() - tI2cStart;
+    if(i2cDur > maxI2cDurUs)
+      maxI2cDurUs = i2cDur;
     int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
     int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
     int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
@@ -4522,7 +4532,14 @@ static void imuSdWriteTest()
     if(now - lastHeapCheck >= 1000000)
     {
       lastHeapCheck = now;
+      // [DIAG] Time the heap integrity check: it walks every heap block, so on a
+      // large heap it can take tens of ms. If it's the thing stalling the sampler
+      // (221 ms gaps), this will show it.
+      uint32_t tHeap = micros();
       bool ok = heap_caps_check_integrity_all(true);
+      uint32_t heapDur = micros() - tHeap;
+      if(heapDur > maxHeapCheckUs)
+        maxHeapCheckUs = heapDur;
       if(!ok && !heapFail)
       {
         heapFail = true;
@@ -4536,11 +4553,16 @@ static void imuSdWriteTest()
       uint32_t elapsedMs = (now - start) / 1000;
       uint32_t expected = elapsedMs; // 1 sample per ms at 1 kHz
       uint32_t pct = expected ? (samples * 100) / expected : 0;
+      // [DIAG] Time the serial print too (115200 baud is slow for long lines).
+      uint32_t tSer = micros();
       Serial.printf("  t=%lu ms  samples=%lu (expect %lu, %lu%%)  i2cFails=%lu  maxGap=%lu us  ring=%lu  written=%lu/%lu  heap=%s\n",
         (unsigned long)elapsedMs, (unsigned long)samples, (unsigned long)expected, (unsigned long)pct,
         (unsigned long)i2cFails, (unsigned long)maxGapUs,
         (unsigned long)ring.bytesUsed(), (unsigned long)writtenBytes, (unsigned long)kTarget,
         ok ? "OK" : "CORRUPT");
+      uint32_t serDur = micros() - tSer;
+      if(serDur > maxSerialUs)
+        maxSerialUs = serDur;
     }
 
     // Stop once we've written the target number of bytes (or, when not writing
@@ -4603,6 +4625,8 @@ static void imuSdWriteTest()
   Serial.printf("\nIMU SD WRITE TEST done (write=%d): %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
     SD_TEST_WRITE, (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
     (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
+  Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us\n",
+    (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs);
 #if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
