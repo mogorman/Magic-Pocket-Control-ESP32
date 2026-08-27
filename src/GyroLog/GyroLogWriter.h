@@ -327,6 +327,16 @@ private:
     // MPU6886 I2C address (7-bit). The M5 Core2's internal IMU sits at 0x68.
     static const uint8_t kImuAddr = 0x68;
 
+    // I2C clock (Hz) for draining the MPU6886 FIFO. 400 kHz is the datasheet
+    // "fast mode" limit, but the FIFO data read is the throughput bottleneck at
+    // the sensor's ~3.8 kHz rate (we need to move ~53 KB/s and 400 kHz I2C tops
+    // out at ~50 KB/s). 1 MHz ("fast mode plus") gives ~2.5x headroom. The
+    // M5Unified In_I2C bus is shared with other sensors, but they're only touched
+    // on the main loop (core 1) and the FIFO drain runs on the sampler task
+    // (core 0), so a faster clock here doesn't disturb them. If the sensor
+    // misbehaves at 1 MHz (reads fail / garbage), drop this back to 400000.
+    static const uint32_t kImuI2cHz = 1000000;
+
     // SD card status (for the on-screen diagnostic).
     bool _sdReady = false;
     std::string _sdStatusMessage;

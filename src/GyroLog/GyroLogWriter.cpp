@@ -584,11 +584,19 @@ uint32_t GyroLogWriter::drainFifoOnce()
         }
     }
 
+    // The I2C clock for the FIFO drain. The MPU6886's FIFO data read is the
+    // bottleneck: at 400 kHz the ~512-byte reads take ~6 ms, so the sampler can
+    // only drain ~25 KB/s while the sensor produces ~53 KB/s at 3.8 kHz -- the
+    // FIFO overflows and we lose ~half the samples. Bumping the I2C clock to 1
+    // MHz (ESP32 "fast mode plus") gives ~2.5x headroom. The 4th arg to
+    // readRegister/writeRegister8 is the I2C clock in Hz.
+    const uint32_t i2cHz = kImuI2cHz;
+
     // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low).
     uint32_t tStart = micros();
     uint32_t tCnt = micros();
     uint8_t cnt[2];
-    if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, 400000))
+    if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, i2cHz))
         return 0; // I2C read failed this pass
     uint32_t cntUs = micros() - tCnt;
     uint16_t fifoBytes = (uint16_t)((cnt[0] << 8) | cnt[1]);
@@ -599,7 +607,7 @@ uint32_t GyroLogWriter::drainFifoOnce()
     // it and resync the sequence so we don't keep reading misaligned data.
     if(fifoBytes >= 1024)
     {
-        M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, 400000); // FIFO_RESET
+        M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, i2cHz); // FIFO_RESET
         _fifoSeq = 0;
         return 0;
     }
@@ -620,7 +628,7 @@ uint32_t GyroLogWriter::drainFifoOnce()
         uint32_t pktsThisTx = (availPkts > 36) ? 36 : availPkts;
         size_t chunk = (size_t)pktsThisTx * 14;
         uint32_t tRead = micros();
-        if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, 400000))
+        if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, i2cHz))
             break; // I2C read failed; stop draining this pass
         dataUs += micros() - tRead;
         fifoBytes -= (uint16_t)chunk;
