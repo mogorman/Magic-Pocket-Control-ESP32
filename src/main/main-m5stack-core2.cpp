@@ -4170,7 +4170,7 @@ static void sdStressTest()
 //
 // Set IMU_SAMPLE_TEST to 1 to run it at boot.
 #ifndef IMU_SAMPLE_TEST
-#define IMU_SAMPLE_TEST 0
+#define IMU_SAMPLE_TEST 1
 #endif
 
 #if IMU_SAMPLE_TEST
@@ -4200,6 +4200,13 @@ static void imuSampleTest()
   uint32_t i2cFails = 0;
   bool heapFail = false;
   const uint32_t kDuration = 30000000; // 30 s
+  // [DIAG] Capture-rate + gap tracking, same as the SD write test, so we can
+  // compare: does pure 1 kHz I2C sampling (no SD, no writer task) also drop
+  // samples / show 6 ms gaps? If yes, the limit is the I2C polling itself.
+  uint32_t lastSampleTime = 0;
+  uint32_t maxGapUs = 0;
+  uint32_t maxIterUs = 0;
+  uint32_t lastIter = 0;
 
   Serial.println("sampling at 1 kHz for 30 s, no SD...");
   for(;;)
@@ -4209,6 +4216,15 @@ static void imuSampleTest()
     // Stop after the duration.
     if(now - start >= kDuration)
       break;
+
+    // [DIAG] Loop period (time since the previous iteration).
+    if(lastIter)
+    {
+      uint32_t iter = now - lastIter;
+      if(iter > maxIterUs)
+        maxIterUs = iter;
+    }
+    lastIter = now;
 
     // Sample at ~1 kHz (same gate as the logger).
     if(now - lastSample < 1000)
@@ -4244,6 +4260,16 @@ static void imuSampleTest()
     }
     samples++;
 
+    // [DIAG] Track the gap since the previous sample (a true 1 kHz rate is
+    // ~1000 us; a larger gap means the loop was preempted).
+    if(lastSampleTime)
+    {
+      uint32_t gap = now - lastSampleTime;
+      if(gap > maxGapUs)
+        maxGapUs = gap;
+    }
+    lastSampleTime = now;
+
     // Once per second: check heap integrity + report progress.
     if(now - lastHeapCheck >= 1000000)
     {
@@ -4256,8 +4282,12 @@ static void imuSampleTest()
           (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
           (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
       }
-      Serial.printf("  t=%lu ms  samples=%lu  i2cFails=%lu  ring=%lu/%lu  heap=%s\n",
-        (unsigned long)((now - start) / 1000), (unsigned long)samples, (unsigned long)i2cFails,
+      uint32_t elapsedMs = (now - start) / 1000;
+      uint32_t expected = elapsedMs;
+      uint32_t pct = expected ? (samples * 100) / expected : 0;
+      Serial.printf("  t=%lu ms  samples=%lu (expect %lu, %lu%%)  i2cFails=%lu  maxGap=%lu us  maxIter=%lu us  ring=%lu/%lu  heap=%s\n",
+        (unsigned long)elapsedMs, (unsigned long)samples, (unsigned long)expected, (unsigned long)pct,
+        (unsigned long)i2cFails, (unsigned long)maxGapUs, (unsigned long)maxIterUs,
         (unsigned long)ringCount, (unsigned long)kRingSize, ok ? "OK" : "CORRUPT");
     }
   }
@@ -4269,8 +4299,12 @@ static void imuSampleTest()
 
   heap_caps_free(ring);
 
-  Serial.printf("\nIMU SAMPLE TEST done: %lu samples in 30 s, %lu i2c failures, heap %s\n",
-    (unsigned long)samples, (unsigned long)i2cFails, heapFail ? "CORRUPT" : "OK");
+  uint32_t elapsedTotal = (micros() - start) / 1000;
+  uint32_t expectedTotal = elapsedTotal;
+  uint32_t pctTotal = expectedTotal ? (samples * 100) / expectedTotal : 0;
+  Serial.printf("\nIMU SAMPLE TEST done: %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, maxIter=%lu us, heap %s\n",
+    (unsigned long)samples, (unsigned long)elapsedTotal, (unsigned long)expectedTotal, (unsigned long)pctTotal,
+    (unsigned long)i2cFails, (unsigned long)maxGapUs, (unsigned long)maxIterUs, heapFail ? "CORRUPT" : "OK");
   Serial.println(heapFail ? "=== IMU SAMPLE TEST: HEAP CORRUPTED (I2C/sampling is the corruptor) ==="
                           : "=== IMU SAMPLE TEST: heap clean (1 kHz sampling alone is NOT the corruptor) ===");
 
@@ -4291,7 +4325,7 @@ static void imuSampleTest()
 //
 // Set IMU_SD_WRITE_TEST to 1 to run it at boot.
 #ifndef IMU_SD_WRITE_TEST
-#define IMU_SD_WRITE_TEST 1
+#define IMU_SD_WRITE_TEST 0
 #endif
 
 #if IMU_SD_WRITE_TEST
