@@ -455,23 +455,6 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     }
     DEBUG_INFO("[GYRO-DIAG] begin(): open() took %lu us", (unsigned long)(micros() - tOpen));
 
-    // Pre-allocate the file up front so the SD card never has to search for
-    // free clusters mid-write (the high-speed-logging pattern). Any unused
-    // pre-allocated space is removed by truncate() at close.
-    //
-    // Size it for a full hour of 1 kHz data: 3,600,000 samples x ~34 B/row
-    // (typical) is ~122 MB, and ~155 MB in the worst case where every field is
-    // full-width. Reserve 160 MB to cover the worst case with headroom; SdFat
-    // grows it beyond that only if a clip runs longer than an hour.
-    //
-    // preAllocate() needs that much *contiguous* free space; on a nearly-full
-    // card it can fail. That's not fatal -- we just log it and record without
-    // pre-allocation (the file still grows normally, allocating as it goes).
-    uint32_t tPre = micros();
-    if(!_file.preAllocate(160UL * 1024 * 1024))
-        DEBUG_INFO("[GYRO] begin(): preAllocate(160 MB) failed (card too full/fragmented?) -- recording without pre-allocation");
-    DEBUG_INFO("[GYRO-DIAG] begin(): preAllocate(160 MB) took %lu us", (unsigned long)(micros() - tPre));
-
     // Wire the (PSRAM-backed) ring buffer to the file. The sampler writes rows
     // into the ring; drainRing() calls ring.writeOut() to commit them to the file.
     // If the PSRAM allocation fails we can't decouple the sampler from the writer,
@@ -542,15 +525,19 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     // (The writer task is not started yet, so this is the only writer right now.)
     _file.write((const uint8_t*)header, (size_t)n);
 
-    // Create the ring's cross-task synchronization objects and start the writer
-    // task. The sampler (loop task) will append rows to the ring; the writer
-    // task (other core) commits them to the card.
+    // Create the ring's cross-task synchronization objects and start both tasks:
+    // the sampler task (drains the FIFO into the ring) and the writer task
+    // (commits the ring to the card). Starting the sampler AFTER the header is
+    // written means no samples are lost to a pre-header drain, and the FIFO was
+    // just reset by configureFifo() so it's empty at this point.
     if(!_ringMutex)
         _ringMutex = xSemaphoreCreateMutex();
     if(!_dataSem)
         _dataSem = xSemaphoreCreateBinary();
     _writerStop = false;
+    _samplerStop = false;
     startWriterTask();
+    startSamplerTask();
 
     _tMs = 0;
     _startMicros = micros();
@@ -562,37 +549,26 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     return true;
 }
 
-void GyroLogWriter::poll()
+// Drain the MPU6886 FIFO once, appending each buffered packet to the ring.
+// This is the core sampling step: it reads the FIFO count, handles an overflow
+// (reset + resync), then reads the FIFO data in 512-byte I2C chunks and turns
+// each 14-byte packet into one GCSV row. Returns the number of packets drained
+// this pass (0 if nothing was buffered or an I2C read failed).
+//
+// It is called from the dedicated sampler task (which runs fast enough to keep
+// the 1 KB FIFO from overflowing) and, as a safety net, from poll() on the loop
+// task. It is NOT re-entrant: only one caller should run it at a time. The
+// sampler task is the primary caller; poll() only calls it when the sampler
+// task is not running (e.g. during the pre-recording calibration screen).
+uint32_t GyroLogWriter::drainFifoOnce()
 {
-    if(_state != State::Recording)
-        return;
-
-    uint32_t now = micros();
-
-    // [DIAG] Once per second while recording, verify the internal + PSRAM heap
-    // integrity and report the loop task's stack high-water mark. poll() runs on
-    // the loop task, so this is its own HWM.
-    static uint32_t lastHeapCheck = 0;
-    if(now - lastHeapCheck >= 1000000)
-    {
-        lastHeapCheck = now;
-        bool ok = heap_caps_check_integrity_all(true);
-        if(!ok)
-            DEBUG_ERROR("[GYRO-DIAG] poll(): HEAP INTEGRITY FAIL at seq=%lu (internal free=%lu, psram free=%lu)",
-                (unsigned long)_fifoSeq, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
-        UBaseType_t hwm = uxTaskGetStackHighWaterMark(NULL);
-        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu loopHWM=%u bytes free",
-            (unsigned long)_fifoSeq, (unsigned long)_ring.bytesUsed(), (unsigned)hwm);
-    }
-
-    // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low). We drain
-    // whenever there's data; the FIFO paces us (no 1 ms gate needed).
+    // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low).
     uint8_t cnt[2];
     if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, 400000))
-        return; // I2C read failed this pass; retry next loop iteration
+        return 0; // I2C read failed this pass
     uint16_t fifoBytes = (uint16_t)((cnt[0] << 8) | cnt[1]);
     if(fifoBytes == 0)
-        return; // nothing buffered yet
+        return 0; // nothing buffered yet
 
     // If the FIFO is full (1024 bytes) it has overflowed -- we fell behind. Reset
     // it and resync the sequence so we don't keep reading misaligned data.
@@ -600,7 +576,7 @@ void GyroLogWriter::poll()
     {
         M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, 400000); // FIFO_RESET
         _fifoSeq = 0;
-        return;
+        return 0;
     }
 
     // Drain the FIFO in 512-byte chunks. Each chunk is ONE I2C transaction
@@ -609,6 +585,7 @@ void GyroLogWriter::poll()
     // Each drained packet becomes one GCSV row; the "t" field is the running
     // packet index (_fifoSeq), so the stream stays gap-free and correctly spaced
     // even when we drain a burst of samples after a stall.
+    uint32_t drained = 0;
     bool appended = false;
     while(fifoBytes >= 14)
     {
@@ -647,6 +624,7 @@ void GyroLogWriter::poll()
                 appended = true;
             }
             _fifoSeq++;
+            drained++;
         }
     }
 
@@ -655,6 +633,40 @@ void GyroLogWriter::poll()
     // sampler's cadence is never blocked by a card write.
     if(appended && _dataSem)
         xSemaphoreGive(_dataSem);
+
+    return drained;
+}
+
+void GyroLogWriter::poll()
+{
+    if(_state != State::Recording)
+        return;
+
+    // [DIAG] Once per second while recording, verify the internal + PSRAM heap
+    // integrity and report the sampler task's stack high-water mark.
+    uint32_t now = micros();
+    static uint32_t lastHeapCheck = 0;
+    if(now - lastHeapCheck >= 1000000)
+    {
+        lastHeapCheck = now;
+        bool ok = heap_caps_check_integrity_all(true);
+        if(!ok)
+            DEBUG_ERROR("[GYRO-DIAG] poll(): HEAP INTEGRITY FAIL at seq=%lu (internal free=%lu, psram free=%lu)",
+                (unsigned long)_fifoSeq, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+        UBaseType_t hwm = (_samplerTask != nullptr) ? uxTaskGetStackHighWaterMark(_samplerTask)
+                                                     : uxTaskGetStackHighWaterMark(NULL);
+        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu samplerHWM=%u bytes free",
+            (unsigned long)_fifoSeq, (unsigned long)_ring.bytesUsed(), (unsigned)hwm);
+    }
+
+    // The dedicated sampler task does the actual FIFO draining (it runs fast
+    // enough to keep the 1 KB FIFO from overflowing). poll() no longer drains the
+    // FIFO itself -- doing so from the slow main loop is exactly what overflowed
+    // the FIFO and lost ~86% of samples. We only drain here as a fallback when
+    // the sampler task is not running (e.g. the pre-recording calibration screen
+    // reads the IMU via poll() before a recording starts).
+    if(_samplerTask == nullptr)
+        drainFifoOnce();
 }
 
 void GyroLogWriter::drainRing()
@@ -758,13 +770,81 @@ void GyroLogWriter::stopWriterTask()
     }
 }
 
+// The sampler task's main loop. It drains the MPU6886 FIFO continuously, fast
+// enough to keep the 1 KB FIFO (which only buffers ~25 ms at the sensor's ~2.87
+// kHz rate) from overflowing. Each pass reads the FIFO count and drains all
+// buffered packets to the ring, then sleeps ~2 ms before the next pass. 2 ms is
+// far shorter than the 25 ms overflow window, so the FIFO stays shallow and no
+// samples are lost -- even if the main loop (UI/BLE work) is busy, because this
+// runs on its own task, not the loop task.
+void GyroLogWriter::samplerTaskTrampoline(void* param)
+{
+    ((GyroLogWriter*)param)->samplerTask();
+    // Do NOT self-delete: stopSamplerTask() calls vTaskDelete(_samplerTask)
+    // exactly once. Block until the teardown deletes us.
+    for(;;)
+        vTaskDelay(pdMS_TO_TICKS(1000));
+}
+
+void GyroLogWriter::samplerTask()
+{
+    while(!_samplerStop)
+    {
+        // Drain everything currently in the FIFO. drainFifoOnce() reads the count
+        // and, if there's data, reads it out in chunks and appends rows to the
+        // ring (waking the writer task). It's bounded internally, so a stuck
+        // FIFO count can't spin us.
+        drainFifoOnce();
+
+        // Pace the drain. 2 ms is well under the ~25 ms overflow window, so the
+        // FIFO never fills up. A shorter delay would drain more often but burn CPU
+        // for no benefit (the FIFO only gains ~6 packets per 2 ms at 2.87 kHz).
+        vTaskDelay(pdMS_TO_TICKS(2));
+    }
+
+    // Final drain on the way out: pull any remaining FIFO packets into the ring so
+    // the very end of the clip is captured before the writer flushes the ring to
+    // the card. This is the "flush everything out" the user asked for on stop.
+    drainFifoOnce();
+}
+
+void GyroLogWriter::startSamplerTask()
+{
+    if(_samplerTask != nullptr)
+        return; // already running
+    _samplerStop = false;
+    // 4 KB stack: the task only does a small I2C read and a ring append, so
+    // this is ample. Pinned to core 1 (the same core as the loop task) at
+    // priority 5 -- HIGHER than the loop task (priority 1) and the writer task
+    // (priority 2) -- so it preempts the UI to drain the FIFO promptly and is
+    // never starved by UI/BLE work. The I2C read (core 1) and the SPI card write
+    // (core 0, writer task) stay on separate cores, which is what keeps the
+    // shared-bus contention from stalling the drain.
+    xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
+        this, 5, &_samplerTask, 1);
+}
+
+void GyroLogWriter::stopSamplerTask()
+{
+    if(_samplerTask == nullptr)
+        return;
+    // Ask the sampler to stop. It will do a final FIFO drain (see samplerTask())
+    // and then exit its loop; the trampoline blocks until we delete it below.
+    _samplerStop = true;
+    // Give it a moment to finish its final drain, then delete it exactly once.
+    vTaskDelay(pdMS_TO_TICKS(50));
+    if(_samplerTask != nullptr)
+    {
+        vTaskDelete(_samplerTask);
+        _samplerTask = nullptr;
+    }
+}
+
 void GyroLogWriter::closeFile()
 {
     if(_file.isOpen())
     {
-        // Remove any unused pre-allocated space, then flush the file's data and
-        // its directory entry (size) to the card.
-        _file.truncate();
+        // Flush the file's data and its directory entry (size) to the card.
         _file.sync();
         _file.close();
     }
@@ -970,13 +1050,32 @@ bool GyroLogWriter::end()
     if(_state != State::Recording)
         return false;
 
-    // Stop the writer task first so it no longer drains the ring concurrently.
-    // It does a final drain of any stragglers on the way out.
-    stopWriterTask();
+    // [DIAG] Timestamp each step of end() to find where a long block happens.
+    // (The 100 s "ended log" delay after a record stop points at a blocking call
+    // in this function or its caller.)
+    uint32_t tEnter = micros();
+    DEBUG_INFO("[GYRO-DIAG] end(): ENTER (t=%lu us)", (unsigned long)tEnter);
 
-    // Final drain of any remaining samples (now on this loop task, the writer is
-    // gone), then close the file and commit the directory entry to the card.
+    // Stop the SAMPLER task first. It does a final drain of the MPU6886 FIFO on
+    // the way out, so the very last samples get into the ring before we stop.
+    // (It must stop before the writer so no new rows are appended while the
+    // writer is doing its final flush.)
+    stopSamplerTask();
+    DEBUG_INFO("[GYRO-DIAG] end(): stopSamplerTask took %lu us", (unsigned long)(micros() - tEnter));
+    tEnter = micros();
+
+    // Stop the writer task. It does a final drain of the ring to the file on the
+    // way out, so everything buffered (including the sampler's final FIFO drain)
+    // is committed to the card.
+    stopWriterTask();
+    DEBUG_INFO("[GYRO-DIAG] end(): stopWriterTask took %lu us", (unsigned long)(micros() - tEnter));
+    tEnter = micros();
+
+    // Belt-and-braces final drain of any ring stragglers (now on this loop task,
+    // both tasks are gone), then close the file and commit the directory entry.
     drainRing();
+    DEBUG_INFO("[GYRO-DIAG] end(): drainRing took %lu us", (unsigned long)(micros() - tEnter));
+    tEnter = micros();
 
     // Restore the MPU6886 to a clean state now that we're done sampling: disable
     // the FIFO and put the clock source back to M5Unified's default (the 8 MHz
@@ -987,13 +1086,15 @@ bool GyroLogWriter::end()
     M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // FIFO_EN = 0 (disable FIFO)
     M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000); // clock src = 8 MHz RC (M5Unified default)
     _fifoConfigured = false;
+    DEBUG_INFO("[GYRO-DIAG] end(): sensor-restore (I2C) took %lu us", (unsigned long)(micros() - tEnter));
+    tEnter = micros();
 
     if(_file.isOpen())
     {
         _finalFileSizeBytes = _file.fileSize();
         uint32_t tClose = micros();
         closeFile(); // truncate() + sync() + close()
-        DEBUG_INFO("[GYRO-DIAG] end(): closeFile() (truncate+sync+close) took %lu us", (unsigned long)(micros() - tClose));
+        DEBUG_INFO("[GYRO-DIAG] end(): closeFile() (sync+close) took %lu us", (unsigned long)(micros() - tClose));
         uint32_t tSync = micros();
         syncVolume();
         DEBUG_INFO("[GYRO-DIAG] end(): syncVolume() (unmount+remount) took %lu us", (unsigned long)(micros() - tSync));
@@ -1015,5 +1116,6 @@ bool GyroLogWriter::end()
     _summary.freeBytes = (uint64_t)(int32_t)_sd.freeClusterCount() * bpc;
 
     _state = State::Idle;
+    DEBUG_INFO("[GYRO-DIAG] end(): LEAVE (summary step took %lu us)", (unsigned long)(micros() - tEnter));
     return true;
 }

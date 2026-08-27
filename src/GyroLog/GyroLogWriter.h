@@ -234,6 +234,22 @@ private:
     volatile bool _writerStop = false;        // tells the writer task to exit
     uint32_t _lastWriteMicros = 0;           // micros() of the writer's last card write (batch rate-limit)
 
+    // ---- Sampler task (drains the MPU6886 FIFO) ----
+    // The MPU6886's 1 KB FIFO only buffers ~25 ms of samples at its ~2.87 kHz
+    // rate. The main loop can't drain it that fast (it does UI/BLE work), so the
+    // FIFO overflowed and we lost ~86% of samples. The fix: a dedicated
+    // high-priority task that drains the FIFO every ~1-2 ms (well within the
+    // 25 ms window) and appends rows to the ring. The writer task (above) then
+    // commits the ring to the card. Pinned to core 1 (with the loop task) at a
+    // higher priority so it preempts the UI to drain the FIFO promptly; the I2C
+    // read and the SPI card write (core 0) stay on separate cores.
+    TaskHandle_t _samplerTask = nullptr;
+    volatile bool _samplerStop = false;      // tells the sampler task to exit
+    // Bounded FIFO-drain guard: max I2C reads per poll() pass, so a stuck FIFO
+    // count can't spin the sampler. (The FIFO count normally decreases as we
+    // read, but a misbehaving clone could leave it high.)
+    static const int kMaxFifoReadsPerPass = 8;
+
     // Writer batch policy: only commit to the card once a decent chunk is
     // buffered (kMinWriteBytes) or a max interval has passed (kMaxWriteIntervalUs).
     // This keeps the SPI transaction rate low (a few per 10 ms instead of ~1000/
@@ -329,6 +345,23 @@ private:
     // stopWriterTask() from end() (signals stop, then joins the task).
     void startWriterTask();
     void stopWriterTask();
+
+    // The sampler task's main loop: continuously drain the MPU6886 FIFO into the
+    // ring (fast enough to never overflow the 1 KB FIFO), waking the writer as
+    // data arrives. On a stop request it does a final FIFO drain and exits.
+    // Runs on its own high-priority FreeRTOS task.
+    static void samplerTaskTrampoline(void* param);
+    void samplerTask();
+
+    // Start / stop the sampler task. startSamplerTask() is called from begin();
+    // stopSamplerTask() from end() (signals stop, does a final drain, joins).
+    void startSamplerTask();
+    void stopSamplerTask();
+
+    // Drain the MPU6886 FIFO once, appending each packet to the ring. Shared by
+    // the sampler task's loop and its final drain. Bounded so a stuck FIFO count
+    // can't spin. Returns the number of packets drained this pass.
+    uint32_t drainFifoOnce();
 
     // Close the FatFile and commit it to the card. Safe to call when no file is open.
     void closeFile();

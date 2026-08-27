@@ -5134,7 +5134,13 @@ void loop() {
   // Keep the gyro log sampling at ~1 kHz while a clip is being recorded. This
   // runs regardless of the 5 ms UI delay below so the sample cadence stays
   // tight. (No-op when not recording.)
+  // [DIAG] Time poll(): if the FIFO-drain I2C read ever blocks (e.g. the I2C
+  // bus is held after an SD remount), this is where the main loop would stall.
+  uint32_t tPoll = micros();
   gyroLog.poll();
+  uint32_t pollDur = micros() - tPoll;
+  if(pollDur > 5000) // > 5 ms is suspicious for a single poll() pass
+    DEBUG_INFO("[GYRO-DIAG] loop(): poll() took %lu us (long!) seq=%lu", (unsigned long)pollDur, (unsigned long)0);
 
   // Finalise a just-stopped GCSV log here, on the main loop thread. The record
   // stop callback (BLE notify thread) only set gyroPendingEnd; doing the
@@ -5143,8 +5149,10 @@ void loop() {
   if(gyroPendingEnd)
   {
     gyroPendingEnd = false;
+    uint32_t tEnd = micros();
     if(gyroLog.end())
-      DEBUG_INFO("[GYRO] ended log, duration %lu ms", (unsigned long)gyroLog.getSummary().durationMs);
+      DEBUG_INFO("[GYRO] ended log, duration %lu ms  (end() took %lu us)",
+        (unsigned long)gyroLog.getSummary().durationMs, (unsigned long)(micros() - tEnd));
   }
 
   // Apply a queued clip-name rename here, on the main loop thread, once the
