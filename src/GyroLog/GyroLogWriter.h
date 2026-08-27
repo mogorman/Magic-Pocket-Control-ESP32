@@ -175,9 +175,14 @@ public:
 
     // Diagnostics from the last recording: how many FIFO-data I2C reads failed
     // (a non-zero count at a high I2C clock means the clock is too fast for the
-    // sensor) and how many times the FIFO overflowed (we fell behind draining it).
+    // sensor) and how many times the FIFO overflowed (we fell behind draining).
     uint32_t i2cFailures() const { return _i2cFailures; }
     uint32_t fifoOverflows() const { return _fifoOverflows; }
+
+    // Set the I2C clock (Hz) used for the FIFO drain. The E2E test uses this to
+    // sweep a few clock values and find the reliability/throughput sweet spot.
+    // Takes effect on the next recording (drainFifoOnce reads _i2cHz each pass).
+    void setI2cHz(uint32_t hz) { _i2cHz = hz; }
 
     // Diagnostic: sweep DLPF_CFG x FCHOICE_B and log the measured FIFO rate for
     // each combo, to find a config that yields ~1 kHz (drainable over I2C)
@@ -358,6 +363,9 @@ private:
     // (core 0), so a faster clock here doesn't disturb them. If the sensor
     // misbehaves at 1 MHz (reads fail / garbage), drop this back to 400000.
     static const uint32_t kImuI2cHz = 1000000;
+    // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
+    // E2E test can override it via setI2cHz() to sweep for the best value.
+    uint32_t _i2cHz = kImuI2cHz;
 
     // SD card status (for the on-screen diagnostic).
     bool _sdReady = false;

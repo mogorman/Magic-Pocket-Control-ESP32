@@ -655,12 +655,11 @@ uint32_t GyroLogWriter::drainFifoOnce()
     }
 
     // The I2C clock for the FIFO drain. The MPU6886's FIFO data read is the
-    // bottleneck: at 400 kHz the ~512-byte reads take ~6 ms, so the sampler can
-    // only drain ~25 KB/s while the sensor produces ~53 KB/s at 3.8 kHz -- the
-    // FIFO overflows and we lose ~half the samples. Bumping the I2C clock to 1
-    // MHz (ESP32 "fast mode plus") gives ~2.5x headroom. The 4th arg to
-    // readRegister/writeRegister8 is the I2C clock in Hz.
-    const uint32_t i2cHz = kImuI2cHz;
+    // bottleneck: at 400 kHz the reads are too slow to keep up with the sensor's
+    // ~3.8 kHz (we lose samples); 1 MHz is fast enough but can have sporadic
+    // read failures. The 4th arg to readRegister/writeRegister8 is the I2C clock
+    // in Hz. _i2cHz is a member so the E2E test can sweep it via setI2cHz().
+    const uint32_t i2cHz = _i2cHz;
 
     // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low).
     uint32_t tStart = micros();

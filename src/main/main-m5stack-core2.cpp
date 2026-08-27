@@ -4359,24 +4359,51 @@ static void imuSampleTest()
 // The E2E test's state machine. It runs on the main loop (called from loop())
 // and only sets the same pending flags the real record button sets, so the
 // actual begin()/end() happen in the normal loop() code path.
-//   -1 = running the DLPF/FCHOICE_B rate sweep (diagnostic)
+//   -2 = I2C clock sweep (runs the record test at several clock values)
+//   -1 = DLPF/FCHOICE_B rate sweep (diagnostic)
 //   0 = waiting to start   1 = recording   2 = stopped, about to verify
 //   3 = done (reported)
-// Start at 0 to skip the (already-run) rate sweep and go straight to the record
-// test; set to -1 to run the sweep first.
-static int e2eState = 0;
+// Start at -2 to sweep the I2C clock (find the reliability/throughput sweet spot),
+// or 0 to just run the record test at the default clock.
+static int e2eState = -2;
 static uint32_t e2eStartMs = 0;   // millis() when the record start was queued
 static std::string e2eClipName;  // the clip name we started (to find the file)
+// I2C clock values to sweep (Hz). We look for the fastest clock that still gives
+// ~0 I2C read failures (reliable) -- that maximizes captured samples.
+static const uint32_t kI2cSweep[] = {400000, 600000, 800000, 1000000, 1500000};
+static int e2eSweepIdx = 0;
+// True if the current record run is part of the I2C clock sweep (so after it we
+// advance to the next clock rather than finishing).
+static bool e2eStateWasSweep = false;
 
 static void gyroE2ETestTick()
 {
   switch(e2eState)
   {
+    case -2:
+    {
+      // I2C clock sweep: for each clock value, set it and run a short record
+      // test (states 0->1->2), reporting capture % + I2C failures. Then move to
+      // the next clock. This finds the reliability/throughput sweet spot in one
+      // boot.
+      if(e2eSweepIdx < (int)(sizeof(kI2cSweep) / sizeof(kI2cSweep[0])))
+      {
+        uint32_t hz = kI2cSweep[e2eSweepIdx];
+        DEBUG_INFO("[GYRO-E2E] === I2C clock sweep: trying %lu Hz ===", (unsigned long)hz);
+        gyroLog.setI2cHz(hz);
+        e2eStateWasSweep = true;
+        e2eState = 0; // start the record test at this clock
+      }
+      else
+      {
+        DEBUG_INFO("[GYRO-E2E] I2C clock sweep complete");
+        e2eState = 3;
+      }
+      break;
+    }
     case -1:
     {
-      // First, run the DLPF/FCHOICE_B rate sweep to find a ~1 kHz config. This
-      // is a diagnostic; it takes a few seconds. Then fall through to the normal
-      // record test (state 0).
+      // DLPF/FCHOICE_B rate sweep (diagnostic).
       DEBUG_INFO("[GYRO-E2E] running FIFO rate sweep (DLPF x FCHOICE_B)");
       gyroLog.sweepFifoRate();
       DEBUG_INFO("[GYRO-E2E] sweep done; proceeding to record test");
@@ -4452,10 +4479,22 @@ static void gyroE2ETestTick()
               (long)samples, (long)expected, (long)expected - (long)samples);
 
           // Dump the file head (header + first few sample rows) to confirm the
-          // GCSV is well-formed for Gyroflow.
-          gyroLog.dumpFileHead(path, 400);
+          // GCSV is well-formed for Gyroflow. (Only for the first sweep entry to
+          // keep the log short; the structure is the same at every clock.)
+          if(e2eSweepIdx == 0)
+            gyroLog.dumpFileHead(path, 400);
         }
-        e2eState = 3;
+        // After a sweep run, advance to the next I2C clock (back to state -2).
+        // If we're not in a sweep (or this was the last clock), finish.
+        if(e2eStateWasSweep)
+        {
+          e2eSweepIdx++;
+          e2eState = (e2eSweepIdx < (int)(sizeof(kI2cSweep) / sizeof(kI2cSweep[0]))) ? -2 : 3;
+        }
+        else
+        {
+          e2eState = 3;
+        }
       }
       break;
     }
