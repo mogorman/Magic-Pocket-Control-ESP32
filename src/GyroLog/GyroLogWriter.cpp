@@ -1082,15 +1082,20 @@ void GyroLogWriter::samplerTaskTrampoline(void* param)
 
 void GyroLogWriter::samplerTask()
 {
-    // 1 kHz sampling by REAL TIME, not by task ticks. We run the I2C read as fast
-    // as the scheduler allows, but only KEEP a sample when >=1 ms of real time
-    // (esp_timer_get_time, microsecond-accurate) has passed since the last kept
-    // sample. Because the source is the output registers (always the LATEST value),
-    // "keep if >=1 ms since last" yields exactly one sample per 1 ms of real time
-    // regardless of how janky the task scheduling is: if the task runs at 1.2 kHz
-    // we drop the extras, if it runs at 0.8 kHz we still keep one per ms. This is
-    // drift-free and immune to the ~20% tick-miss we saw with vTaskDelay(1).
-    uint64_t lastKeptUs = 0;
+    // 1 kHz sampling pinned to the REAL-TIME 1 ms grid (esp_timer_get_time,
+    // microsecond-accurate). Each iteration we:
+    //   1. spin (with tiny yields so the writer task gets scheduled) until the
+    //      next 1 ms boundary,
+    //   2. read the latest sample exactly on the boundary and append one dense row,
+    //   3. if the read finished with time to spare before the NEXT boundary, yield
+    //      a bit so the writer can commit the ring; otherwise go straight to the
+    //      next boundary.
+    // Pinning to the grid (rather than a vTaskDelay(1) tick) means a slow I2C read
+    // or a brief scheduler hiccup does NOT accumulate drift: the next sample is
+    // always at the next 1 ms boundary, so the long-run rate is exactly 1 kHz and
+    // the "t" index stays dense. The I2C read takes ~0.4-0.6 ms (well under 1 ms),
+    // so there's always slack to yield to the writer without missing the grid.
+    uint64_t nextBoundaryUs = 0;
     for(;;)
     {
         // Not recording: poll _state every ~5 ms (cheap) until a recording
@@ -1100,47 +1105,33 @@ void GyroLogWriter::samplerTask()
         if(_state != State::Recording)
         {
             vTaskDelay(pdMS_TO_TICKS(5));
-            lastKeptUs = 0; // resync the time base on (re)start
+            nextBoundaryUs = 0; // resync the grid on (re)start
             continue;
         }
 
-        // Read the latest sample. pollOutputRegisters() appends a row only if we
-        // tell it to (it checks the time gate below via the return value). We do
-        // the time gate here: only call it when >=1 ms has passed since the last
-        // kept sample.
-        uint64_t nowUs = esp_timer_get_time();
-        uint32_t tRead0 = micros();
-        if(lastKeptUs == 0 || (nowUs - lastKeptUs) >= 1000)
+        // Compute the next 1 ms boundary (in esp_timer us) if we haven't yet.
+        if(nextBoundaryUs == 0)
         {
-            if(pollOutputRegisters() > 0)
-                lastKeptUs = nowUs;
-        }
-        uint32_t readUs = micros() - tRead0;
-
-        // [DIAG] Once per second, report the sampler's actual loop rate and the
-        // average time the I2C read (pollOutputRegisters) takes, to find why we're
-        // missing ~20% of the 1 ms ticks.
-        {
-            static uint32_t dLast = 0;
-            static uint32_t dLoops = 0, dReadUs = 0;
-            dLoops++;
-            dReadUs += readUs;
-            uint32_t now = millis();
-            if(dLast == 0) dLast = now;
-            if(now - dLast >= 1000)
-            {
-                DEBUG_INFO("[GYRO-DIAG] sampler: %lu loops/s (want ~1000), avg I2C read %lu us",
-                    (unsigned long)dLoops, (unsigned long)(dLoops ? dReadUs / dLoops : 0));
-                dLast = now; dLoops = 0; dReadUs = 0;
-            }
+            uint64_t now = esp_timer_get_time();
+            nextBoundaryUs = ((now / 1000) + 1) * 1000;
         }
 
-        // Yield to the writer task (lower priority, same core) so it can commit
-        // the ring to the card. A 1 ms yield keeps our loop running near the 1 kHz
-        // cadence while giving the writer regular service. (If the writer needs
-        // more than 1 ms for a big batch, it just runs a bit longer; our time
-        // gate above keeps the output rate correct regardless.)
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // Spin (microsecond-accurate) until the next 1 ms boundary. We yield a
+        // tick each pass so the writer (lower priority, same core) gets scheduled;
+        // the spin is short (<=1 ms) so this is cheap and stays on the grid.
+        while(esp_timer_get_time() < nextBoundaryUs)
+        {
+            vTaskDelay(1);
+        }
+
+        // Read the latest sample exactly on the boundary and append one dense row.
+        pollOutputRegisters();
+
+        // Advance to the next 1 ms boundary. If the read finished early (it always
+        // does, ~0.4-0.6 ms < 1 ms), we have slack; yield a tick so the writer can
+        // commit the ring, then the spin above waits out the rest of the interval.
+        nextBoundaryUs += 1000;
+        vTaskDelay(1);
     }
 }
 
