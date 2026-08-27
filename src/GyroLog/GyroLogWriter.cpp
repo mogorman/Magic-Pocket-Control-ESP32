@@ -585,9 +585,12 @@ uint32_t GyroLogWriter::drainFifoOnce()
     }
 
     // Poll the MPU6886 FIFO count (2 bytes: 0x23 high, 0x24 low).
+    uint32_t tStart = micros();
+    uint32_t tCnt = micros();
     uint8_t cnt[2];
     if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, 400000))
         return 0; // I2C read failed this pass
+    uint32_t cntUs = micros() - tCnt;
     uint16_t fifoBytes = (uint16_t)((cnt[0] << 8) | cnt[1]);
     if(fifoBytes == 0)
         return 0; // nothing buffered yet
@@ -609,13 +612,17 @@ uint32_t GyroLogWriter::drainFifoOnce()
     // even when we drain a burst of samples after a stall.
     uint32_t drained = 0;
     bool appended = false;
+    uint32_t tData = micros();
+    uint32_t dataUs = 0;
     while(fifoBytes >= 14)
     {
         uint32_t availPkts = fifoBytes / 14;
         uint32_t pktsThisTx = (availPkts > 36) ? 36 : availPkts;
         size_t chunk = (size_t)pktsThisTx * 14;
+        uint32_t tRead = micros();
         if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, 400000))
             break; // I2C read failed; stop draining this pass
+        dataUs += micros() - tRead;
         fifoBytes -= (uint16_t)chunk;
 
         for(size_t p = 0; p < chunk; p += 14)
@@ -655,6 +662,28 @@ uint32_t GyroLogWriter::drainFifoOnce()
     // sampler's cadence is never blocked by a card write.
     if(appended && _dataSem)
         xSemaphoreGive(_dataSem);
+
+    // [DIAG] Once per second, report where drainFifoOnce()'s time goes: the
+    // FIFO-count read, the FIFO-data reads, and the total. If the data reads
+    // dominate (tens of ms), the I2C bus is the bottleneck and we can't keep up
+    // with the sensor's ~3.8 kHz rate.
+    {
+        static uint32_t lastTimeLog = 0;
+        static uint32_t aCnt = 0, aData = 0, aTotal = 0, aCalls = 0, aBytes = 0;
+        uint32_t totalUs = micros() - tStart;
+        aCnt += cntUs; aData += dataUs; aTotal += totalUs; aCalls++; aBytes += (uint32_t)drained * 14;
+        if(micros() - lastTimeLog >= 1000000)
+        {
+            lastTimeLog = micros();
+            DEBUG_INFO("[GYRO-DIAG] drain: %lu calls/s, avg cnt=%lu us data=%lu us total=%lu us, %lu B/s drained",
+                (unsigned long)aCalls,
+                (unsigned long)(aCalls ? aCnt / aCalls : 0),
+                (unsigned long)(aCalls ? aData / aCalls : 0),
+                (unsigned long)(aCalls ? aTotal / aCalls : 0),
+                (unsigned long)aBytes);
+            aCnt = aData = aTotal = aCalls = aBytes = 0;
+        }
+    }
 
     return drained;
 }
