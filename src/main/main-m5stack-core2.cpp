@@ -4170,7 +4170,7 @@ static void sdStressTest()
 //
 // Set IMU_SAMPLE_TEST to 1 to run it at boot.
 #ifndef IMU_SAMPLE_TEST
-#define IMU_SAMPLE_TEST 1
+#define IMU_SAMPLE_TEST 0
 #endif
 
 #if IMU_SAMPLE_TEST
@@ -4325,7 +4325,7 @@ static void imuSampleTest()
 //
 // Set IMU_SD_WRITE_TEST to 1 to run it at boot.
 #ifndef IMU_SD_WRITE_TEST
-#define IMU_SD_WRITE_TEST 0
+#define IMU_SD_WRITE_TEST 1
 #endif
 
 #if IMU_SD_WRITE_TEST
@@ -4342,6 +4342,12 @@ static void imuSampleTest()
 // (display, BLE) is the cause.
 #ifndef SD_TEST_WRITE
 #define SD_TEST_WRITE 0
+#endif
+// When 0, the writer task is NOT started (the ring fills and drops, no SD
+// write). Used to isolate whether the act of writing to the card (SPI) -- vs
+// merely having the writer task scheduled -- is what preempts the sampler.
+#ifndef SD_TEST_WRITER
+#define SD_TEST_WRITER 0
 #endif
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
@@ -4490,11 +4496,20 @@ static void imuSdWriteTest()
   // Pin the writer to the OTHER core so its long card writes (up to ~220 ms)
   // never starve the sampler. The Arduino loop task (where this test's sampler
   // runs) is on core 1 on the ESP32, so we pin the writer to core 0.
+  //
+  // SD_TEST_WRITER=0 skips starting the writer task entirely (the ring just fills
+  // and drops, no SD write) to isolate whether it's the *act of writing to the
+  // card* (SPI transactions) or merely *having the writer task scheduled* that
+  // causes the sampler's 6 ms preemptions.
   TaskHandle_t writerTask = nullptr;
+#if SD_TEST_WRITER
   // ESP32 Arduino's xTaskCreatePinnedToCore: (func, name, stack, params, priority, &handle, coreID)
   xTaskCreatePinnedToCore(imuTestWriterTask, "imuTestWriter", 8192, &writerState, 2, &writerTask, 0);
   Serial.printf("writer task pinned to core 0; loop/sampler task is on core %d\n",
     (int)xPortGetCoreID());
+#else
+  Serial.println("writer task NOT started (SD_TEST_WRITER=0); ring fills and drops, no SD write");
+#endif
   // Drop-rate diagnostics. At 1 kHz we expect exactly 1 sample per ms, so the
   // "expected" sample count is the elapsed time in ms. Comparing actual vs
   // expected tells us whether we're capturing a constant 1 kHz rate or missing
@@ -4628,10 +4643,10 @@ static void imuSdWriteTest()
 #endif
   }
 
-  uint64_t finalSize = 0;
-#if SD_TEST_WRITE
-  // Stop the writer task. It does a final drain of any stragglers on the way
-  // out, so after this the ring is empty and no more writes are in flight.
+  // Stop the writer task (if we started one). It does a final drain of any
+  // stragglers on the way out, so after this the ring is empty and no more
+  // writes are in flight.
+#if SD_TEST_WRITER
   writerStop = true;
   if(dataSem)
     xSemaphoreGive(dataSem);
@@ -4641,6 +4656,10 @@ static void imuSdWriteTest()
     vTaskDelete(writerTask);
     writerTask = nullptr;
   }
+#endif
+
+  uint64_t finalSize = 0;
+#if SD_TEST_WRITE
   // Close the file. If we pre-allocated, truncate() frees the unused
   // pre-allocated clusters and shrinks the file to the real written size; if we
   // didn't pre-allocate, the file is already the right size so we skip it.
