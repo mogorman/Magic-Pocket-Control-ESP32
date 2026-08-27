@@ -4,6 +4,7 @@
 #include <esp_heap_caps.h> // heap_caps_check_integrity_all (diagnostics)
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h> // uxTaskGetStackHighWaterMark (stack-overflow diagnostic)
+#include <esp_timer.h> // esp_timer_get_time() for the microsecond-accurate 1 kHz sampling grid
 #include <math.h>
 #include <cstring>
 #include <time.h>
@@ -1041,6 +1042,14 @@ void GyroLogWriter::samplerTaskTrampoline(void* param)
 
 void GyroLogWriter::samplerTask()
 {
+    // 1 kHz sampling pinned to the real-time 1 ms grid. We spin (microsecond-
+    // accurate, via esp_timer_get_time()) until the next 1 ms boundary, read the
+    // latest sample exactly on the boundary, then yield to the writer task with a
+    // 1 ms vTaskDelay (the writer is lower priority on the same core, so it only
+    // runs when we yield). Pinning to the real-time grid means a brief delay does
+    // NOT accumulate drift: if we're late we sample immediately and resync to the
+    // grid, so the long-run rate stays exactly 1 kHz.
+    uint64_t nextUs = esp_timer_get_time() + 1000;
     for(;;)
     {
         // Not recording: poll _state every ~5 ms (cheap) until a recording
@@ -1053,13 +1062,22 @@ void GyroLogWriter::samplerTask()
             continue;
         }
 
-        // 1 kHz poll: read the latest gyro+accel sample from the output registers
-        // and append one dense row. We use a 1 ms delay as the tick. vTaskDelay
-        // on the ESP32 is accurate to ~15 us at 80/160 MHz, so the cadence holds
-        // ~1 kHz. If a tick is ever missed (a brief stall), we simply lose that
-        // one sample (a single gap) and the next tick recovers -- the "t" index
-        // stays dense because we only ever append one row per tick.
+        // Spin (microsecond-accurate) until the next 1 ms boundary. We yield a
+        // tick each pass so the writer (lower priority, same core) gets scheduled;
+        // the spin is short (<=1 ms) so this is cheap.
+        while(esp_timer_get_time() < nextUs)
+        {
+            vTaskDelay(1); // yield; the loop re-checks the boundary each wake
+        }
+
+        // Read the latest sample exactly on the boundary and append one dense row.
         pollOutputRegisters();
+
+        // Advance to the next 1 ms boundary and yield to the writer for ~1 ms so
+        // it can commit the ring to the card. If we fell behind (a long writer
+        // stall), nextUs is already in the past and we resync immediately next
+        // iteration -- no cumulative drift.
+        nextUs += 1000;
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
