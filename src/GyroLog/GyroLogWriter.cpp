@@ -337,6 +337,70 @@ void GyroLogWriter::configureFifo()
     _fifoConfigured = true;
 }
 
+// Diagnostic: sweep the MPU6886's DLPF_CFG (CONFIG 0x1A) and FCHOICE_B
+// (GYRO_CONFIG 0x1B bits[1:0]) and measure the resulting FIFO sample rate for
+// each combination. The goal is to find a config that yields ~1 kHz (which the
+// I2C bus can fully drain) instead of the clone's default ~3.8 kHz (which it
+// can't). Logs one line per combo. Does NOT leave the sensor in a recording
+// state; the caller re-runs configureFifo() afterwards.
+void GyroLogWriter::sweepFifoRate()
+{
+    // DLPF_CFG values to try (0,1,2,3,4,5,6,7) and FCHOICE_B values (0,1,2,3).
+    const uint8_t dlpfVals[8] = {0,1,2,3,4,5,6,7};
+    const uint8_t fchoiceVals[4] = {0,1,2,3};
+    uint8_t calBuf[512];
+
+    for(uint8_t fchoice : fchoiceVals)
+    {
+        for(uint8_t dlpf : dlpfVals)
+        {
+            // Set the clock source (active), DLPF, and FCHOICE_B, enable the
+            // FIFO, and reset it.
+            M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x40, 400000); // PWR_MGMT_1 = PLL gyro X
+            vTaskDelay(pdMS_TO_TICKS(10));
+            M5.In_I2C.writeRegister8(kImuAddr, 0x1A, dlpf, 400000);        // CONFIG: DLPF_CFG
+            M5.In_I2C.writeRegister8(kImuAddr, 0x1B, (fchoice << 1), 400000); // GYRO_CONFIG: FCHOICE_B (FSR=0)
+            M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x03, 400000);        // FIFO_EN = gyro+accel
+            M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, 400000);        // FIFO_RESET
+            vTaskDelay(pdMS_TO_TICKS(150)); // let the post-reset burst drain
+
+            // Measure the rate over a 400 ms window.
+            uint32_t calStart = micros();
+            uint32_t calPackets = 0;
+            uint32_t calCountStart = 0;
+            while(micros() - calStart < 550000)
+            {
+                uint32_t t = micros();
+                if(t - calStart >= 150000 && !calCountStart)
+                    calCountStart = t;
+                uint8_t c[2];
+                if(!M5.In_I2C.readRegister(kImuAddr, 0x23, c, 2, 400000))
+                    break;
+                uint16_t fb = (uint16_t)((c[0] << 8) | c[1]);
+                if(fb >= 14)
+                {
+                    uint32_t pkts = fb / 14;
+                    size_t chunk = (pkts > 36) ? 36 * 14 : (size_t)pkts * 14;
+                    if(M5.In_I2C.readRegister(kImuAddr, 0x2C, calBuf, chunk, 400000))
+                    {
+                        uint32_t got = (uint32_t)(chunk / 14);
+                        if(t >= calCountStart)
+                            calPackets += got;
+                    }
+                }
+            }
+            uint32_t calMs = calCountStart ? ((micros() - calCountStart) / 1000) : 0;
+            float rate = calMs ? (calPackets * 1000.0f) / calMs : 0.0f;
+            DEBUG_INFO("[GYRO-SWEEP] FCHOICE_B=%d DLPF_CFG=%d -> rate=%.1f Hz (tscale=%.6f)",
+                (int)fchoice, (int)dlpf, (double)rate, rate ? (double)(1.0f/rate) : 0.0);
+        }
+    }
+    // Leave the FIFO disabled and the clock at the M5Unified default so the
+    // sensor is in a clean state when the caller re-configures it.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // FIFO_EN = 0
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000); // clock = 8 MHz RC (M5Unified default)
+}
+
 GyroLogWriter::~GyroLogWriter()
 {
     // Stop the writer task (if running) and delete the FreeRTOS objects.

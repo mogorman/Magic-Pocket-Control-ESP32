@@ -4359,9 +4359,10 @@ static void imuSampleTest()
 // The E2E test's state machine. It runs on the main loop (called from loop())
 // and only sets the same pending flags the real record button sets, so the
 // actual begin()/end() happen in the normal loop() code path.
+//   -1 = running the DLPF/FCHOICE_B rate sweep (diagnostic)
 //   0 = waiting to start   1 = recording   2 = stopped, about to verify
 //   3 = done (reported)
-static int e2eState = 0;
+static int e2eState = -1;
 static uint32_t e2eStartMs = 0;   // millis() when the record start was queued
 static std::string e2eClipName;  // the clip name we started (to find the file)
 
@@ -4369,6 +4370,17 @@ static void gyroE2ETestTick()
 {
   switch(e2eState)
   {
+    case -1:
+    {
+      // First, run the DLPF/FCHOICE_B rate sweep to find a ~1 kHz config. This
+      // is a diagnostic; it takes a few seconds. Then fall through to the normal
+      // record test (state 0).
+      DEBUG_INFO("[GYRO-E2E] running FIFO rate sweep (DLPF x FCHOICE_B)");
+      gyroLog.sweepFifoRate();
+      DEBUG_INFO("[GYRO-E2E] sweep done; proceeding to record test");
+      e2eState = 0;
+      break;
+    }
     case 0:
     {
       // Wait for the settle delay, then queue a record start (exactly what the

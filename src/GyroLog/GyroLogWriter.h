@@ -173,6 +173,12 @@ public:
     // given clip duration.
     float measuredRateHz() const { return (_tscale > 0.0f) ? (1.0f / _tscale) : 0.0f; }
 
+    // Diagnostic: sweep DLPF_CFG x FCHOICE_B and log the measured FIFO rate for
+    // each combo, to find a config that yields ~1 kHz (drainable over I2C)
+    // instead of the clone's default ~3.8 kHz. Leaves the sensor in a clean
+    // (non-FIFO) state; call configureFifo() afterwards for a real recording.
+    void sweepFifoRate();
+
     const Summary& getSummary() const { return _summary; }
 
     // SD card status, for the on-screen diagnostic.
