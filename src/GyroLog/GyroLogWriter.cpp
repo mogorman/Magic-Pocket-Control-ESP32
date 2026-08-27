@@ -612,6 +612,8 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _lastSampleMicros = _startMicros;
     _lastDrainMicros = _startMicros;
     _fifoSeq = 0; // GCSV "t" starts at 0 (the first drained FIFO packet)
+    _i2cFailures = 0;
+    _fifoOverflows = 0;
 
     _state = State::Recording;
     return true;
@@ -665,7 +667,10 @@ uint32_t GyroLogWriter::drainFifoOnce()
     uint32_t tCnt = micros();
     uint8_t cnt[2];
     if(!M5.In_I2C.readRegister(kImuAddr, 0x23, cnt, 2, i2cHz))
+    {
+        _i2cFailures++; // count it so the E2E test can flag a clock that's too fast
         return 0; // I2C read failed this pass
+    }
     uint32_t cntUs = micros() - tCnt;
     uint16_t fifoBytes = (uint16_t)((cnt[0] << 8) | cnt[1]);
     if(fifoBytes == 0)
@@ -677,6 +682,7 @@ uint32_t GyroLogWriter::drainFifoOnce()
     {
         M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, i2cHz); // FIFO_RESET
         _fifoSeq = 0;
+        _fifoOverflows++;
         return 0;
     }
 
@@ -698,7 +704,10 @@ uint32_t GyroLogWriter::drainFifoOnce()
         size_t chunk = (size_t)fifoBytes; // exact buffered count, <= 1024
         uint32_t tRead = micros();
         if(!M5.In_I2C.readRegister(kImuAddr, 0x2C, _fifoBuf, chunk, i2cHz))
+        {
+            _i2cFailures++;
             chunk = 0; // I2C read failed; nothing drained this pass
+        }
         dataUs = micros() - tRead;
 
         size_t fullPackets = chunk / 14;

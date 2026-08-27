@@ -173,6 +173,12 @@ public:
     // given clip duration.
     float measuredRateHz() const { return (_tscale > 0.0f) ? (1.0f / _tscale) : 0.0f; }
 
+    // Diagnostics from the last recording: how many FIFO-data I2C reads failed
+    // (a non-zero count at a high I2C clock means the clock is too fast for the
+    // sensor) and how many times the FIFO overflowed (we fell behind draining it).
+    uint32_t i2cFailures() const { return _i2cFailures; }
+    uint32_t fifoOverflows() const { return _fifoOverflows; }
+
     // Diagnostic: sweep DLPF_CFG x FCHOICE_B and log the measured FIFO rate for
     // each combo, to find a config that yields ~1 kHz (drainable over I2C)
     // instead of the clone's default ~3.8 kHz. Leaves the sensor in a clean
@@ -328,6 +334,12 @@ private:
     // resamples to the video rate correctly.
     uint32_t _fifoSeq = 0;          // running packet index (the GCSV "t" value)
     uint8_t _fifoBuf[1024];         // scratch for a FIFO read (up to the full 1 KB FIFO = 73 packets)
+    // Diagnostics: count of I2C read failures and FIFO overflows during the last
+    // recording. Exposed via i2cFailures()/fifoOverflows() for the E2E test to
+    // report (a non-zero I2C-failure count at a higher clock means the clock is
+    // too fast for the sensor).
+    volatile uint32_t _i2cFailures = 0;
+    volatile uint32_t _fifoOverflows = 0;
     float _tscale = 0.001f;         // measured seconds-per-sample (written to the header)
     bool _fifoConfigured = false;  // true once begin() set up the FIFO
 

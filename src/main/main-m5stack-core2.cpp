@@ -4438,6 +4438,10 @@ static void gyroE2ETestTick()
           // The headline line: the actual recorded sample count vs the expected.
           DEBUG_INFO("[GYRO-E2E] RECORDED %ld samples (expected ~%ld at %.0f Hz over %.1f s)",
             (long)samples, (long)expected, rateHz, wallSec);
+          // Diagnostics: I2C read failures (non-zero at a high clock = clock too
+          // fast for the sensor) and FIFO overflows (we fell behind draining).
+          DEBUG_INFO("[GYRO-E2E] i2cFailures=%lu fifoOverflows=%lu",
+            (unsigned long)gyroLog.i2cFailures(), (unsigned long)gyroLog.fifoOverflows());
 
           // PASS if the recorded count is within 20% of the expected count.
           bool ok = (expected > 0) && (samples >= (long)(expected * 0.80)) && (samples <= (long)(expected * 1.20));
