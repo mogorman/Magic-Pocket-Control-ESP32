@@ -4408,49 +4408,30 @@ static void gyroE2ETestTick()
         snprintf(path, sizeof(path), "/%s.gcsv", e2eClipName.c_str());
         long samples = gyroLog.countSamplesInFile(path);
 
-        // The expected count is the duration times the measured sample rate. The
-        // measured rate is 1/_tscale (samples/sec). We don't have _tscale
-        // directly here, but the summary's durationMs was computed as
-        // _fifoSeq * _tscale * 1000, so _fifoSeq (the sample count) is the
-        // ground truth we just read back. Compare it against the expected
-        // duration-based count using the same measured rate.
-        //
-        // Simpler and more robust: report the measured sample count and the
-        // implied duration (samples / rate). We get the rate from the summary's
-        // durationMs and the sample count: rate = samples / (durationMs/1000).
-        // But the cleanest check is: did we capture ~duration x rate samples?
-        // We know the wall-clock duration (GYRO_E2E_DURATION_S) and we measured
-        // the rate at begin(). Report both and let the log show the numbers.
+        // The expected sample count is the wall-clock duration times the measured
+        // IMU rate (measured at begin()). If the sampler kept up, the recorded
+        // count should match this; a big shortfall means samples were lost.
         double wallSec = (double)GYRO_E2E_DURATION_S;
-        DEBUG_INFO("[GYRO-E2E] recorded %ld samples in ~%.1f s wall time", (long)samples, wallSec);
+        double rateHz = (double)gyroLog.measuredRateHz();
+        long expected = (long)(wallSec * rateHz);
+
         if(samples < 0)
         {
           DEBUG_ERROR("[GYRO-E2E] FAIL: could not read back '%s' (open failed)", path);
         }
         else
         {
-          // Expected samples = duration x measured rate. The measured rate is
-          // samples-per-second; we can recover it as samples / (measured
-          // duration in seconds). The summary durationMs is the measured data
-          // duration. So measured rate = samples / (durationMs/1000). The
-          // expected count for the wall duration at that rate is
-          // wallSec * rate = wallSec * samples / (durationMs/1000).
-          //
-          // For a direct PASS/FAIL we check the sample count is in the expected
-          // band: it should be close to (wallSec * measuredRate). Since
-          // measuredRate = samples/(durationMs/1000), the expected count at the
-          // wall duration is wallSec*1000/durationMs * samples. If the sampler
-          // kept up, durationMs ~= wallSec*1000, so expected ~= samples. We
-          // pass if the measured data duration is within 20% of the wall
-          // duration (i.e. we captured the full clip, not a truncated 1 s).
-          uint32_t dataMs = gyroLog.getSummary().durationMs;
-          uint32_t wallMs = (uint32_t)GYRO_E2E_DURATION_S * 1000UL;
-          bool ok = (dataMs > 0) && (dataMs >= (wallMs * 80) / 100) && (dataMs <= (wallMs * 120) / 100);
+          // The headline line: the actual recorded sample count vs the expected.
+          DEBUG_INFO("[GYRO-E2E] RECORDED %ld samples (expected ~%ld at %.0f Hz over %.1f s)",
+            (long)samples, (long)expected, rateHz, wallSec);
+
+          // PASS if the recorded count is within 20% of the expected count.
+          bool ok = (expected > 0) && (samples >= (long)(expected * 0.80)) && (samples <= (long)(expected * 1.20));
           DEBUG_INFO("[GYRO-E2E] data duration %lu ms vs wall %lu ms -> %s",
-            (unsigned long)dataMs, (unsigned long)wallMs, ok ? "PASS" : "FAIL");
+            (unsigned long)gyroLog.getSummary().durationMs, (unsigned long)(wallSec * 1000), ok ? "PASS" : "FAIL");
           if(!ok)
-            DEBUG_ERROR("[GYRO-E2E] FAIL: data duration %lu ms is not within 20%% of wall %lu ms (lost samples?)",
-              (unsigned long)dataMs, (unsigned long)wallMs);
+            DEBUG_ERROR("[GYRO-E2E] FAIL: recorded %ld samples is not within 20%% of expected %ld (lost %ld samples?)",
+              (long)samples, (long)expected, (long)expected - (long)samples);
         }
         e2eState = 3;
       }

@@ -168,6 +168,11 @@ public:
     State state() const { return _state; }
     bool isRecording() const { return _state == State::Recording; }
 
+    // The measured IMU sample rate in Hz (1/_tscale), measured at begin(). The
+    // end-to-end test uses this to compute the expected sample count for a
+    // given clip duration.
+    float measuredRateHz() const { return (_tscale > 0.0f) ? (1.0f / _tscale) : 0.0f; }
+
     const Summary& getSummary() const { return _summary; }
 
     // SD card status, for the on-screen diagnostic.

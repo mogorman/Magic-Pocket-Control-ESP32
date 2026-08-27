@@ -655,8 +655,11 @@ void GyroLogWriter::poll()
                 (unsigned long)_fifoSeq, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
         UBaseType_t hwm = (_samplerTask != nullptr) ? uxTaskGetStackHighWaterMark(_samplerTask)
                                                      : uxTaskGetStackHighWaterMark(NULL);
-        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu samplerHWM=%u bytes free",
-            (unsigned long)_fifoSeq, (unsigned long)_ring.bytesUsed(), (unsigned)hwm);
+        // Report whether the sampler task is actually running. If it's null, the
+        // main loop's poll() is doing the FIFO drain (slow -> sample loss).
+        DEBUG_INFO("[GYRO-DIAG] poll(): seq=%lu ringUsed=%lu samplerTask=%s hwm=%u",
+            (unsigned long)_fifoSeq, (unsigned long)_ring.bytesUsed(),
+            (_samplerTask != nullptr) ? "RUNNING" : "NULL", (unsigned)hwm);
     }
 
     // The dedicated sampler task does the actual FIFO draining (it runs fast
@@ -820,8 +823,13 @@ void GyroLogWriter::startSamplerTask()
     // never starved by UI/BLE work. The I2C read (core 1) and the SPI card write
     // (core 0, writer task) stay on separate cores, which is what keeps the
     // shared-bus contention from stalling the drain.
-    xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
+    BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
         this, 5, &_samplerTask, 1);
+    if(rc != pdPASS || _samplerTask == nullptr)
+        DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
+            (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+    else
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5)");
 }
 
 void GyroLogWriter::stopSamplerTask()
