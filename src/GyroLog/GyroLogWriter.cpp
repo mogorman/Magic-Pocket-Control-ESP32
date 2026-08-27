@@ -288,13 +288,17 @@ bool GyroLogWriter::readImu(float* gx, float* gy, float* gz, float* ax, float* a
 void GyroLogWriter::configureFifo()
 {
     // Clock source = PLL gyro X (PWR_MGMT_1 bit6=1, SLEEP clear). This is the
-    // standard "active" clock; the clone still runs at its fixed rate, but the
-    // PLL gives the most stable timing.
+    // standard "active" clock; the PLL gives the most stable timing.
     M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x40, 400000);
     vTaskDelay(pdMS_TO_TICKS(10)); // let the PLL lock
-    // SMPLRT_DIV=0 (no divider). The clone ignores this, but set it for
-    // correctness on any standard MPU6000 that might be swapped in.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x19, 0x00, 400000);
+    // SMPLRT_DIV = 1 and DLPF (CONFIG) = 0x01 -- the EXACT settings the
+    // standalone test used, which held a clean ~2.8 kHz. On this clone the DLPF
+    // (not SMPLRT_DIV) is what sets the FIFO rate; DLPF=0x01 gives ~2.8 kHz,
+    // which the I2C bus (max ~40 KB/s) can fully drain. (Leaving the DLPF at
+    // M5Unified's default let the FIFO run at ~3.8 kHz, which the I2C can't
+    // keep up with -- that was the sample loss.)
+    M5.In_I2C.writeRegister8(kImuAddr, 0x19, 0x01, 400000); // SMPLRT_DIV = 1
+    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x01, 400000); // CONFIG: DLPF = 0x01
     // Enable the FIFO for gyro + accel (FIFO_EN 0x6A = 0x03), then reset it.
     M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x03, 400000);
     M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x01, 400000); // FIFO_RESET
@@ -904,13 +908,13 @@ void GyroLogWriter::stopWriterTask()
     }
 }
 
-// The sampler task's main loop. It drains the MPU6886 FIFO continuously, fast
-// enough to keep the 1 KB FIFO (which only buffers ~25 ms at the sensor's ~2.87
-// kHz rate) from overflowing. Each pass reads the FIFO count and drains all
-// buffered packets to the ring, then sleeps ~2 ms before the next pass. 2 ms is
-// far shorter than the 25 ms overflow window, so the FIFO stays shallow and no
-// samples are lost -- even if the main loop (UI/BLE work) is busy, because this
-// runs on its own task, not the loop task.
+// The sampler task's main loop. It drains the MPU6886 FIFO in a TIGHT loop,
+// exactly like the standalone test that held a clean ~2.8 kHz: drain whatever is
+// in the FIFO, then immediately re-poll. When the FIFO is empty, drainFifoOnce()
+// does only a 2-byte count read and returns fast, so the loop spins cheaply and
+// the FIFO paces us (no fixed delay -- a delay is what let the FIFO fall behind
+// and lose samples). This runs on its own high-priority task so it preempts the
+// main loop's UI work to drain the FIFO promptly.
 void GyroLogWriter::samplerTaskTrampoline(void* param)
 {
     ((GyroLogWriter*)param)->samplerTask();
@@ -925,15 +929,19 @@ void GyroLogWriter::samplerTask()
     while(!_samplerStop)
     {
         // Drain everything currently in the FIFO. drainFifoOnce() reads the count
-        // and, if there's data, reads it out in chunks and appends rows to the
-        // ring (waking the writer task). It's bounded internally, so a stuck
-        // FIFO count can't spin us.
-        drainFifoOnce();
-
-        // Pace the drain. 2 ms is well under the ~25 ms overflow window, so the
-        // FIFO never fills up. A shorter delay would drain more often but burn CPU
-        // for no benefit (the FIFO only gains ~6 packets per 2 ms at 2.87 kHz).
-        vTaskDelay(pdMS_TO_TICKS(2));
+        // and, if there's data, reads it out and appends rows to the ring (waking
+        // the writer task). When the FIFO is empty it just does a 2-byte count
+        // read and returns 0.
+        uint32_t got = drainFifoOnce();
+        if(got == 0)
+        {
+            // The FIFO is empty right now. Yield one tick so the main loop task
+            // (same core, lower priority) gets to run -- it has to process the
+            // record-stop request and the UI. At the sensor's ~2.8 kHz the FIFO
+            // refills within a few hundred us, so a 1-tick yield (~1 ms) costs at
+            // most a handful of buffered samples, which the FIFO holds for us.
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
     }
 
     // Final drain on the way out: pull any remaining FIFO packets into the ring so
@@ -948,25 +956,20 @@ void GyroLogWriter::startSamplerTask()
         return; // already running
     _samplerStop = false;
     // 4 KB stack: the task only does a small I2C read and a ring append, so
-    // this is ample. Pinned to CORE 0 (with the writer task) at priority 5 --
-    // HIGHER than the writer task (priority 2) -- so it preempts the writer to
-    // drain the FIFO promptly.
-    //
-    // Why core 0 and NOT core 1: the main loop (UI/BLE work) runs on core 1 and
-    // is busy for ~7 ms every ~50 ms. If the sampler shared core 1 with it, the
-    // sampler could not run during those blocks (same core), so the FIFO
-    // overflowed and we lost ~55% of samples. On core 0 the sampler runs
-    // independently of the main loop. The I2C (sampler) and SPI (writer) are
-    // different peripherals and can operate concurrently on the same core, so
-    // co-locating them on core 0 is fine -- the sampler just preempts the writer
-    // briefly to drain the FIFO.
+    // this is ample. Pinned to CORE 1 (the same core the standalone test's
+    // sampler ran on) at priority 5 -- HIGHER than the main loop task
+    // (priority 1) -- so the sampler preempts the UI/BLE work to drain the FIFO
+    // in a tight loop, exactly like the test that held a clean ~2.8 kHz. The
+    // writer task stays on core 0, so its long SPI card writes never starve the
+    // sampler (different core). The I2C (sampler, core 1) and SPI (writer, core
+    // 0) are separate peripherals on separate cores, so they don't contend.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 0);
+        this, 5, &_samplerTask, 1);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5)");
 }
 
 void GyroLogWriter::stopSamplerTask()
