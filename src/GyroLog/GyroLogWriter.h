@@ -9,6 +9,68 @@
 #include <freertos/FreeRTOS.h> // TaskHandle_t / SemaphoreHandle_t (writer task)
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <esp_heap_caps.h> // ps_malloc (PSRAM-backed ring buffer)
+
+// A ring buffer backed by a PSRAM allocation, with the same interface the
+// writer uses from SdFat's RingBuf (begin/write/writeOut/bytesUsed). SdFat's
+// RingBuf keeps its buffer in the object (internal RAM), so a large one (e.g.
+// 128 KB for 80 KB write chunks) overflows the ESP32's internal DRAM at link
+// time. This version ps_malloc's the buffer so it can be as big as the PSRAM
+// allows. Used to decouple the IMU sampler from the SD writer task.
+class PsramRing
+{
+public:
+    bool begin(FatFile* file, size_t size)
+    {
+        _file = file;
+        _size = size;
+        _buf = (uint8_t*)ps_malloc(size);
+        if(!_buf)
+            return false;
+        _head = _tail = 0;
+        return true;
+    }
+    // Append up to `count` bytes; drops (returns 0) if the ring can't hold them.
+    size_t write(const void* buf, size_t count)
+    {
+        if(freeSpace() < count)
+            return 0;
+        const uint8_t* src = (const uint8_t*)buf;
+        size_t n = count < (_size - _head) ? count : (_size - _head);
+        memcpy(_buf + _head, src, n);
+        _head = (_head + n) % _size;
+        if(n < count)
+        {
+            memcpy(_buf, src + n, count - n);
+            _head = count - n;
+        }
+        return count;
+    }
+    // Commit up to `count` buffered bytes to the file; returns bytes written.
+    size_t writeOut(size_t count)
+    {
+        size_t avail = used();
+        count = count < avail ? count : avail;
+        size_t n = count < (_size - _tail) ? count : (_size - _tail);
+        _file->write(_buf + _tail, n);
+        _tail = (_tail + n) % _size;
+        if(n < count)
+        {
+            _file->write(_buf, count - n);
+            _tail = count - n;
+        }
+        return count;
+    }
+    size_t used() const { return (_head >= _tail) ? (_head - _tail) : (_size - _tail + _head); }
+    size_t bytesUsed() const { return used(); } // alias matching SdFat RingBuf's name
+    size_t freeSpace() const { return _size - used(); }
+private:
+    FatFile* _file = nullptr;
+    uint8_t* _buf = nullptr;
+    size_t _size = 0;
+    size_t _head = 0;
+    size_t _tail = 0;
+};
 
 // GCSV (Gyroflow CSV) logger for the M5Stack Core2.
 //
@@ -20,8 +82,11 @@
 // The GCSV format is documented at:
 //   https://docs.gyroflow.xyz/app/technical-details/gcsv-format
 //
-// The IMU is sampled at ~1 kHz (the MPU6886's native ODR, polled as fast as
-// the I2C bus allows). Data is quantised to fixed-point integers using the
+// The IMU is sampled via the MPU6886's internal FIFO (drained in bursts), so
+// that a stall on the shared SPI bus (SD card write) never loses samples -- the
+// FIFO holds them until the I2C bus is free again. The sensor's true rate is
+// measured at start and declared in the GCSV "tscale" field so Gyroflow
+// resamples correctly. Data is quantised to fixed-point integers using the
 // gscale/ascale constants below, exactly as Gyroflow expects.
 
 class GyroLogWriter
@@ -145,16 +210,17 @@ private:
     // The GCSV file we are writing (only valid while recording/finalizing).
     FatFile _file;
 
-    // The ring buffer that decouples the 1 kHz IMU sampling from the SD write,
+    // The ring buffer that decouples the IMU sampling from the SD write,
     // modeled on the Adafruit SdFat high-speed-logging pattern (TeensySdioLogger):
-    // the sampler writes GCSV rows into the RingBuf, and a drain calls writeOut()
-    // which commits the buffered bytes to the FatFile. 8 KB is enough to hold a
-    // second or more of ~30-byte rows at 1 kHz.
+    // the sampler writes GCSV rows into the ring, and a drain calls writeOut()
+    // which commits the buffered bytes to the FatFile. It's a PSRAM-backed ring
+    // (128 KB) so the writer can batch large 80 KB chunks to the card without the
+    // ring overflowing internal RAM at link time.
     //
     // The sampler (loop task) and the writer task both touch this ring, so all
-    // access is serialized by _ringMutex (the RingBuf's indices are not
-    // thread-safe across tasks).
-    RingBuf<FatFile, 8192> _ring;
+    // access is serialized by _ringMutex (the ring's indices are not thread-safe
+    // across tasks).
+    PsramRing _ring;
 
     // ---- Writer task (decouples the SD write from the 1 kHz sampler) ----
     // The sampler on the loop task only appends rows to the ring; a dedicated
@@ -172,8 +238,12 @@ private:
     // buffered (kMinWriteBytes) or a max interval has passed (kMaxWriteIntervalUs).
     // This keeps the SPI transaction rate low (a few per 10 ms instead of ~1000/
     // s), which is what lets the I2C IMU read on the other core stay undisturbed.
-    static const size_t kMinWriteBytes = 4 * 1024;
+    // 80 KB is the practical max batch (240 KB caused intermittent shared-SPI-bus
+    // assert crashes); the 128 KB PSRAM ring holds it with headroom.
+    static const size_t kMinWriteBytes = 80 * 1024;
     static const uint32_t kMaxWriteIntervalUs = 50 * 1000;
+    // Size of the PSRAM ring buffer (bytes). Must be >= kMinWriteBytes.
+    static const size_t kRingSize = 128 * 1024;
 
     // The name we started with (may be a generic "clip_NNNN").
     std::string _startedName;
@@ -206,6 +276,22 @@ private:
     uint32_t _startMicros = 0; // micros() at the moment the log started
     uint32_t _lastDrainMicros = 0; // micros() of the last ring drain (rate-limits SD writes)
 
+    // ---- FIFO-based sampling (the fix for data loss on SD-write stalls) ----
+    // The MPU6886's internal FIFO buffers samples. Instead of reading the latest
+    // sample from the output registers every 1 ms (which loses the in-between
+    // samples whenever the shared SPI bus stalls the I2C read), poll() DRAINS the
+    // FIFO: every sample that accumulated while we were busy is read out, so
+    // nothing is lost. Each drained packet is one GCSV row.
+    //
+    // The "t" field is a running packet index (0, 1, 2, ...) -- NOT wall-clock ms
+    // -- because the sensor's true rate is not 1 kHz. The GCSV "tscale" field
+    // (measured at begin()) tells Gyroflow the real seconds-per-sample, so it
+    // resamples to the video rate correctly.
+    uint32_t _fifoSeq = 0;          // running packet index (the GCSV "t" value)
+    uint8_t _fifoBuf[512];          // scratch for a FIFO read chunk (up to 36 packets)
+    float _tscale = 0.001f;         // measured seconds-per-sample (written to the header)
+    bool _fifoConfigured = false;  // true once begin() set up the FIFO
+
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
 
@@ -227,6 +313,12 @@ private:
     // Runs on the writer task (and once from end() on the loop task to flush the
     // tail). Takes _ringMutex around the ring access.
     void drainRing();
+
+    // Configure the MPU6886's FIFO for sampling: set the clock source, ODR
+    // divider, DLPF, enable the FIFO for gyro+accel, and reset it. Then measure
+    // the sensor's true sample rate over a short window and store it in _tscale.
+    // Called from begin() before the first sample.
+    void configureFifo();
 
     // The writer task's main loop: wait for pending rows (or a stop request),
     // then drain the ring to the file. Runs on its own FreeRTOS task.

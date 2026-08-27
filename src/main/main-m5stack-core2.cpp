@@ -4358,75 +4358,34 @@ static void imuSampleTest()
 #endif
 // The ring buffer size (bytes) that decouples the sampler from the writer. Must
 // be >= the batch size (kMinWriteBytes) or the writer can never accumulate a full
-// batch. 8 KB is the default; bump it (e.g. 32 KB) to test larger write chunks.
+// batch. The ring lives in PSRAM (PsramRing) so it can be large (128 KB) without
+// overflowing internal RAM at link time.
 #ifndef SD_TEST_RING_SIZE
-#define SD_TEST_RING_SIZE 8192
+#define SD_TEST_RING_SIZE (128 * 1024)
 #endif
 // How long (seconds) the no-write (SD_TEST_WRITE=0) variant of the test runs.
 // Bumped to 30 s for the 240 KB chunk test so a few full batches complete.
 #ifndef SD_TEST_DURATION_S
 #define SD_TEST_DURATION_S 15
 #endif
+// The MPU6886 ODR divider (SMPLRT_DIV). The sensor can't hit exactly 1 kHz with
+// an integer divider: 0 -> ~2.3 kHz, 1 -> ~1.15 kHz (closest to 1 kHz), 2 ->
+// ~0.77 kHz. We use 1 and declare the true rate in the GCSV tscale field.
+#ifndef SD_TEST_ODR_DIV
+#define SD_TEST_ODR_DIV 1
+#endif
+// The MPU6886 DLPF (CONFIG 0x1A). On this unit the DLPF -- not SMPLRT_DIV --
+// sets the sample rate. 0x01 (44 Hz DLPF) measured ~2.3 kHz; we tune this to get
+// a clean ~1 kHz. Values: 0x00=250Hz,0x01=184Hz,0x02=92Hz,0x03=41Hz,0x04=20Hz,
+// 0x05=10Hz,0x06=5Hz,0x07=2.5Hz (MPU6000 table; the 6886 differs but the trend
+// holds: higher DLPF index = lower bandwidth = lower sample rate).
+#ifndef SD_TEST_DLPF
+#define SD_TEST_DLPF 0x01
+#endif
 
-// A ring buffer backed by a PSRAM allocation, with the same interface the test
-// uses from SdFat's RingBuf (begin/write/writeOut/bytesUsed). SdFat's RingBuf
-// keeps its buffer in the object (internal RAM), so a large one (e.g. 96 KB for
-// 80 KB write chunks) overflows the ESP32's internal DRAM at link time. This
-// version ps_malloc's the buffer so it can be as big as the PSRAM allows.
-class PsramRing
-{
-public:
-  bool begin(FatFile* file, size_t size)
-  {
-    _file = file;
-    _size = size;
-    _buf = (uint8_t*)ps_malloc(size);
-    if(!_buf)
-      return false;
-    _head = _tail = 0;
-    return true;
-  }
-  // Append up to `count` bytes; drops (returns 0) if the ring can't hold them.
-  size_t write(const void* buf, size_t count)
-  {
-    if(freeSpace() < count)
-      return 0;
-    const uint8_t* src = (const uint8_t*)buf;
-    size_t n = count < (_size - _head) ? count : (_size - _head);
-    memcpy(_buf + _head, src, n);
-    _head = (_head + n) % _size;
-    if(n < count)
-    {
-      memcpy(_buf, src + n, count - n);
-      _head = count - n;
-    }
-    return count;
-  }
-  // Commit up to `count` buffered bytes to the file; returns bytes written.
-  size_t writeOut(size_t count)
-  {
-    size_t avail = used();
-    count = count < avail ? count : avail;
-    size_t n = count < (_size - _tail) ? count : (_size - _tail);
-    _file->write(_buf + _tail, n);
-    _tail = (_tail + n) % _size;
-    if(n < count)
-    {
-      _file->write(_buf, count - n);
-      _tail = count - n;
-    }
-    return count;
-  }
-  size_t used() const { return (_head >= _tail) ? (_head - _tail) : (_size - _tail + _head); }
-  size_t bytesUsed() const { return used(); } // alias matching SdFat RingBuf's name
-  size_t freeSpace() const { return _size - used(); }
-private:
-  FatFile* _file = nullptr;
-  uint8_t* _buf = nullptr;
-  size_t _size = 0;
-  size_t _head = 0;
-  size_t _tail = 0;
-};
+// The PsramRing class (a PSRAM-backed ring with the SdFat RingBuf interface)
+// is defined in GyroLogWriter.h and shared by both the production writer and
+// this test. It's used here for the 128 KB ring that holds 80 KB write batches.
 
 // Shared state for the test's dedicated writer task. The sampler (the test's
 // main loop) appends rows to the ring; the writer task (a separate FreeRTOS
@@ -4435,7 +4394,7 @@ private:
 // the sampler's own task stalls the 1 kHz cadence.
 struct ImuTestWriterState
 {
-  RingBuf<FatFile, SD_TEST_RING_SIZE>* ring;
+  PsramRing* ring;
   SemaphoreHandle_t ringMutex;
   SemaphoreHandle_t dataSem;
   volatile bool* stop;
@@ -4456,10 +4415,10 @@ struct ImuTestWriterState
 // card once a decent chunk has accumulated (kMinWriteBytes) OR a max interval
 // has passed (kMaxWriteIntervalUs), whichever comes first. This drops the SPI
 // transaction rate to a few per 10 ms and gives the I2C long quiet windows.
-// Baseline config: matches the PRODUCTION GyroLogWriter (4 KB batch, 50 ms max
-// interval, 8 KB internal-RAM ring, 4 MHz SPI) so this standalone number
-// represents what a real recording achieves before any writer change.
-static const size_t kMinWriteBytes = 4 * 1024;           // write once >= 4 KB is buffered
+// Bumped to an 80 KB batch (with a 128 KB PSRAM ring) to test whether fewer,
+// larger SPI transactions reduce the sampler stalls. 80 KB is the practical max
+// (240 KB caused intermittent shared-SPI-bus assert crashes).
+static const size_t kMinWriteBytes = 80 * 1024;          // write once >= 80 KB is buffered
 static const uint32_t kMaxWriteIntervalUs = 50 * 1000;   // ...or at most once per 50 ms
 
 static void imuTestWriterTask(void* param)
@@ -4581,35 +4540,83 @@ static void imuSdWriteTest()
   Serial.println("preAllocate skipped (SD_TEST_PREALLOCATE=0)");
 #endif
 
-  // The ring buffer that decouples the 1 kHz sampling from the SD write. For the
-  // 8 KB baseline this is the SAME type the production GyroLogWriter uses
-  // (RingBuf<FatFile, 8192>, internal RAM), so the number represents a real
-  // recording before any writer change. `static` so a large ring survives the
-  // function's scope without overflowing the loopTask's stack.
-  static RingBuf<FatFile, SD_TEST_RING_SIZE> ring;
-  ring.begin(&file);
+  // The ring buffer that decouples the sampling from the SD write. It's a
+  // PsramRing (PSRAM-backed) so it can be 128 KB without overflowing internal
+  // RAM at link time. `static` so the large ring survives the function's scope
+  // without overflowing the loopTask's stack.
+  static PsramRing ring;
+  if(!ring.begin(&file, SD_TEST_RING_SIZE))
+  {
+    Serial.println("!! PSRAM ring alloc failed; aborting test");
+    for(;;) delay(1000);
+  }
 
-  // Write a small GCSV-style header so the file is a plausible log.
-  const char* header =
-    "GYROFLOW IMU LOG\n"
-    "version,1.3\n"
-    "id,m5stack-core2-mpu6886\n"
-    "orientation,XYZ\n"
-    "note,IMU SD write test 1kHz\n"
-    "tscale,0.001\n"
-    "gscale,0.00021714498\n"
-    "ascale,0.00024414063\n"
-    "t,gx,gy,gz,ax,ay,az\n";
-  file.write((const uint8_t*)header, strlen(header));
+  // Measure the sensor's TRUE sample rate by draining the FIFO for a short
+  // calibration window and counting packets. The MPU6886 on this unit runs at a
+  // fixed ~2.3 kHz (not 1 kHz) regardless of SMPLRT_DIV/DLPF, so we declare the
+  // measured rate in the GCSV tscale field and let Gyroflow resample to the video
+  // rate. tscale = seconds per sample = 1 / rate.
+  static size_t gHeaderLen = 0;
+  {
+    M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000); // FIFO_RESET
+    // Discard the first 150 ms (the post-reset FIFO burst skews the rate high),
+    // then count packets for a steady 450 ms window.
+    uint32_t calStart = micros();
+    uint32_t calPackets = 0;
+    uint32_t calCountStart = 0;
+    uint8_t calBuf[512];
+    while(micros() - calStart < 600000) // ~600 ms calibration window
+    {
+      uint32_t t = micros();
+      if(t - calStart >= 150000 && !calCountStart)
+        calCountStart = t; // start counting after the discard window
+      uint8_t c[2];
+      if(!M5.In_I2C.readRegister(0x68, 0x23, c, 2, 400000))
+        break;
+      uint16_t fb = (uint16_t)((c[0] << 8) | c[1]);
+      if(fb >= 14)
+      {
+        uint32_t pkts = fb / 14;
+        size_t chunk = (pkts > 36) ? 36 * 14 : (size_t)pkts * 14;
+        if(M5.In_I2C.readRegister(0x68, 0x2C, calBuf, chunk, 400000))
+        {
+          uint32_t got = (uint32_t)(chunk / 14);
+          if(t >= calCountStart)
+            calPackets += got;
+        }
+      }
+    }
+    uint32_t calMs = calCountStart ? ((micros() - calCountStart) / 1000) : 0;
+    float rate = calMs ? (calPackets * 1000.0f) / calMs : 0.0f; // samples/sec
+    float tscale = rate ? (1.0f / rate) : 0.001f;                  // seconds/sample
+    Serial.printf("[calibration] measured rate = %.1f Hz over %lu ms (%lu packets) -> tscale=%.6f s\n",
+      (double)rate, (unsigned long)calMs, (unsigned long)calPackets, (double)tscale);
+    // Write the GCSV header with the measured tscale.
+    char header[256];
+    int hn = snprintf(header, sizeof(header),
+      "GYROFLOW IMU LOG\n"
+      "version,1.3\n"
+      "id,m5stack-core2-mpu6886\n"
+      "orientation,XYZ\n"
+      "note,IMU SD write test FIFO\n"
+      "tscale,%.6f\n"
+      "gscale,0.00021714498\n"
+      "ascale,0.00024414063\n"
+      "t,gx,gy,gz,ax,ay,az\n",
+      (double)tscale);
+    file.write((const uint8_t*)header, (size_t)hn);
+    gHeaderLen = (size_t)hn; // remember for the writtenBytes baseline
+    // Reset the FIFO so the real recording starts from a clean t=0.
+    M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000); // FIFO_RESET
+  }
 
   const size_t kTarget = 14UL * 1024 * 1024; // 14 MB
   uint32_t start = micros();
-  uint32_t lastSample = start;
-  uint32_t lastDrain = start;
   uint32_t lastHeapCheck = start;
   uint32_t samples = 0;
   uint32_t i2cFails = 0;
   bool heapFail = false;
+  uint8_t fifoBuf[512]; // scratch for a FIFO read chunk (up to 512 bytes = 36 packets)
 
   // ---- Dedicated writer task (the thing under test) ----
   // The sampler (this loop) only appends rows to the ring; a separate FreeRTOS
@@ -4620,7 +4627,7 @@ static void imuSdWriteTest()
   SemaphoreHandle_t ringMutex = xSemaphoreCreateMutex();
   SemaphoreHandle_t dataSem = xSemaphoreCreateBinary();
   volatile bool writerStop = false;
-  volatile uint64_t writtenBytes = strlen(header); // shared: writer updates it
+  volatile uint64_t writtenBytes = gHeaderLen; // shared: writer updates it (starts at header size)
   // [DIAG] Shared write-window trackers for the sampler's gap correlation.
   static volatile uint32_t gWriteStart = 0, gWriteEnd = 0, gWriteCount = 0, gMaxWriteDurUs = 0;
   ImuTestWriterState writerState;
@@ -4655,24 +4662,117 @@ static void imuSdWriteTest()
   // expected tells us whether we're capturing a constant 1 kHz rate or missing
   // frames. We also track the largest gap between consecutive samples (a gap
   // well over 1 ms means the loop was stalled, not that the sensor dropped).
-  uint32_t lastSampleTime = 0;   // micros() of the previous sample (for gap tracking)
-  uint32_t maxGapUs = 0;         // largest inter-sample gap seen so far
-  uint32_t maxI2cDurUs = 0;      // longest single I2C read (preemption during the read?)
+  uint32_t maxI2cDurUs = 0;      // longest single FIFO drain (I2C burst) this run
   uint32_t maxHeapCheckUs = 0;  // longest once-per-second heap integrity check
   uint32_t maxSerialUs = 0;     // longest once-per-second Serial.printf
   uint32_t lastIter = 0;        // micros() at the previous loop iteration (loop-period tracking)
   uint32_t maxIterUs = 0;       // longest gap between consecutive loop iterations
-  uint32_t bigGaps = 0;         // count of >2 ms sample gaps
-  uint32_t bigGapsDuringWrite = 0; // ...of those that overlapped a writer SPI write
+  // FIFO-specific diagnostics: the FIFO holds samples while we're stalled, so the
+  // meaningful "how bad was the stall" metric is how many packets we had to drain
+  // in one burst (== the stall length in ms), and how often the FIFO overflowed.
+  uint32_t maxBurst = 0;        // largest number of packets drained in one FIFO read burst
+  uint32_t bigBursts = 0;       // count of drain bursts > 2 packets (== stalls > 2 ms)
+  uint32_t bigBurstsDuringWrite = 0; // ...of those that overlapped a writer SPI write
 
-  Serial.println("sampling at 1 kHz and writing to the SD card until 14 MB...");
+  Serial.println("sampling at 1 kHz via the MPU6886 FIFO and writing to the SD card until 14 MB...");
+
+  // ---- FIFO-based sampling ----
+  // Enable the MPU6886's 1 KB FIFO for gyro + accel (FIFO_EN = 0x03). Each FIFO
+  // packet is 14 bytes (accel 6 + temp 2 + gyro 6). The FIFO buffers up to 73
+  // samples (1024 / 14). Instead of reading the latest sample from the output
+  // registers (0x3B) every 1 ms -- which loses the in-between samples whenever
+  // the I2C bus is stalled by an SD write -- we DRAIN the FIFO: any samples that
+  // accumulated while we were busy are all read out, so nothing is lost.
+  //
+  // At a fixed 1 kHz ODR each FIFO packet is exactly 1 ms after the previous, so
+  // we timestamp by a running packet index (seq): sample #N is at N ms. This
+  // stays accurate across stalls because the FIFO holds the in-between samples.
+  // If the FIFO overflows (we're too slow to drain it), we count the overflow and
+  // resync the sequence.
+  // Switch the clock source to the PLL (gyro X) so SMPLRT_DIV=0 gives a true
+  // 1 kHz ODR. M5Unified left it on the internal 8 MHz RC (clock src=0), which
+  // with SMPLRT_DIV=0 runs at ~2.3 kHz -- too fast for a 1 ms-per-packet GCSV.
+  // PWR_MGMT_1 (0x6B): bits6-7 = clock source, bit0 = SLEEP. 0x40 = clock src
+  // 1 (PLL gyro X) with SLEEP clear (bit0=0). The MPU6886 can't hit exactly
+  // 1 kHz with an integer divider, so we use the closest one (SMPLRT_DIV=1,
+  // ~1.15 kHz) and declare its TRUE rate in the GCSV tscale field (Gyroflow
+  // resamples to the video rate from tscale). SD_TEST_ODR_DIV selects the divider.
+  M5.In_I2C.writeRegister8(0x68, 0x6B, 0x40, 400000); // clock src = PLL gyro X
+  vTaskDelay(pdMS_TO_TICKS(10)); // let the PLL lock
+  M5.In_I2C.writeRegister8(0x68, 0x19, SD_TEST_ODR_DIV, 400000); // ODR divider
+  // The MPU6886's actual sample rate is set by the DLPF (CONFIG 0x1A), not
+  // SMPLRT_DIV (which this unit ignores). SD_TEST_DLPF selects the DLPF so we
+  // can dial the ODR to a clean ~1 kHz. 0x01 (44 Hz) measured ~2.3 kHz.
+  M5.In_I2C.writeRegister8(0x68, 0x1A, SD_TEST_DLPF, 400000); // DLPF
+  M5.In_I2C.writeRegister8(0x68, 0x6A, 0x03, 400000); // FIFO_EN: gyro + accel
+  M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000); // FIFO_RESET
+  // [DIAG] Read back the ODR-determining registers so we know the true sample
+  // rate. PWR_MGMT_1 (0x6B) bit6 = clock source (0=internal 8MHz, 1=PLL gyroX,
+  // 2=PLL gyroY, 3=PLL gyroZ, 4=PLL ref, 5=PLL XIR, 6=32kHz, 7=1MHz).
+  {
+    uint8_t pwrm1 = M5.In_I2C.readRegister8(0x68, 0x6B, 400000);
+    uint8_t smplrt = M5.In_I2C.readRegister8(0x68, 0x19, 400000);
+    uint8_t config = M5.In_I2C.readRegister8(0x68, 0x1A, 400000);
+    uint8_t whoami = M5.In_I2C.readRegister8(0x68, 0x75, 400000); // WHO_AM_I: chip ID
+    Serial.printf("[FIFO cfg] WHO_AM_I=0x%02X  PWR_MGMT_1=0x%02X (clock src=%d)  SMPLRT_DIV=0x%02X  CONFIG(DLPF)=0x%02X\n",
+      whoami, pwrm1, (pwrm1 >> 6) & 0x03, smplrt, config);
+  }
+
+  // [DIAG] Rate sweep: for each SMPLRT_DIV (0..4), set the clock source + divider,
+  // reset the FIFO, let it settle, then measure the actual packet rate over a
+  // steady window. This directly tests whether SMPLRT_DIV controls the rate on
+  // this unit (the online note claims Sample Rate = 1 kHz / (1 + SMPLRT_DIV)).
+  // If the measured rate tracks that formula, SMPLRT_DIV works and we can pick
+  // the divider for a clean 1 kHz; if it stays flat, the sensor ignores it.
+  {
+    Serial.println("[rate sweep] SMPLRT_DIV -> measured rate (expect 1000/(1+div)):");
+    for(uint8_t div = 0; div <= 4; div++)
+    {
+      M5.In_I2C.writeRegister8(0x68, 0x6B, 0x40, 400000); // clock src = PLL gyro X
+      vTaskDelay(pdMS_TO_TICKS(10));
+      M5.In_I2C.writeRegister8(0x68, 0x19, div, 400000);   // SMPLRT_DIV
+      M5.In_I2C.writeRegister8(0x68, 0x6A, 0x03, 400000);   // FIFO_EN: gyro + accel
+      M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000);   // FIFO_RESET
+      vTaskDelay(pdMS_TO_TICKS(150)); // discard the post-reset burst, let it settle
+      // Measure over a steady 300 ms window.
+      uint32_t sStart = micros();
+      uint32_t pkts = 0;
+      uint8_t sBuf[512];
+      while(micros() - sStart < 300000)
+      {
+        uint8_t c[2];
+        if(!M5.In_I2C.readRegister(0x68, 0x23, c, 2, 400000))
+          break;
+        uint16_t fb = (uint16_t)((c[0] << 8) | c[1]);
+        if(fb >= 14)
+        {
+          uint32_t p = fb / 14;
+          size_t chunk = (p > 36) ? 36 * 14 : (size_t)p * 14;
+          if(M5.In_I2C.readRegister(0x68, 0x2C, sBuf, chunk, 400000))
+            pkts += (uint32_t)(chunk / 14);
+        }
+      }
+      uint32_t ms = (micros() - sStart) / 1000;
+      float rate = ms ? (pkts * 1000.0f) / ms : 0.0f;
+      float expect = 1000.0f / (1.0f + div);
+      Serial.printf("  SMPLRT_DIV=%d  measured=%7.1f Hz  (formula expect %6.1f Hz)\n",
+        (int)div, (double)rate, (double)expect);
+    }
+    // Restore the configured divider for the actual test run.
+    M5.In_I2C.writeRegister8(0x68, 0x19, SD_TEST_ODR_DIV, 400000);
+    M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000); // FIFO_RESET
+    vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  uint32_t seq = 0;          // running packet index (== ms since start at 1 kHz)
+  uint32_t fifoOverflows = 0; // times the FIFO was found full/overflowed
+  uint32_t lastFifoDrain = micros();
+
   for(;;)
   {
     uint32_t now = micros();
 
-    // [DIAG] Loop period: time since the previous iteration. If the loop is
-    // spinning freely this is tiny (the gate below throttles it); a large value
-    // means the loop task was preempted between iterations.
+    // [DIAG] Loop period: time since the previous iteration.
     if(lastIter)
     {
       uint32_t iter = now - lastIter;
@@ -4681,72 +4781,109 @@ static void imuSdWriteTest()
     }
     lastIter = now;
 
-    // Sample at ~1 kHz (same gate as the logger).
-    if(now - lastSample < 1000)
-      continue;
-    lastSample = now;
-
-    // Read the IMU directly (14-byte burst at 400 kHz), as readImu() does.
-    // [DIAG] Time the I2C read: a read that takes far longer than its ~200 us
-    // budget means the loop task was preempted *during* the read (or the bus
-    // was held), which would stall the sampler.
-    uint32_t tI2cStart = micros();
-    uint8_t buf[14];
-    if(!M5.In_I2C.readRegister(0x68, 0x3B, buf, 14, 400000))
+    // Poll the FIFO count (2 bytes: 0x23 high, 0x24 low). We drain whenever
+    // there's data; no 1 ms gate needed because the FIFO paces us.
+    uint8_t cnt[2];
+    if(!M5.In_I2C.readRegister(0x68, 0x23, cnt, 2, 400000))
     {
       i2cFails++;
+      // Give the bus a moment and retry; don't advance seq.
+      if(now - lastFifoDrain >= 1000)
+        lastFifoDrain = now;
       continue;
     }
-    uint32_t i2cDur = micros() - tI2cStart;
-    if(i2cDur > maxI2cDurUs)
-      maxI2cDurUs = i2cDur;
-    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
-    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
-    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
-    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
-    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
-    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
+    uint16_t fifoBytes = (uint16_t)((cnt[0] << 8) | cnt[1]);
 
-    // Format a GCSV row and append it to the ring (drops if full, as the
-    // logger does).
-    char row[64];
-    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
-      (unsigned long)((now - start) / 1000),
-      (long)rawGx, (long)rawGy, (long)rawGz,
-      (long)rawAx, (long)rawAy, (long)rawAz);
-
-    // Append the row to the ring under the mutex (the writer task also touches
-    // it), then wake the writer. The sampler never does the card write itself.
-    if(xSemaphoreTake(ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    // Drain all available packets (each 14 bytes). Read in chunks of up to 512
+    // bytes (the FIFO read register's max) until the FIFO is empty.
+    if(fifoBytes > 0)
     {
-      ring.write((const uint8_t*)row, (size_t)n);
-      xSemaphoreGive(ringMutex);
-    }
-    samples++;
-    if(dataSem)
-      xSemaphoreGive(dataSem);
-
-    // Track the gap since the previous sample. At a true 1 kHz rate this is
-    // ~1000 us; a much larger value means the loop was stalled (not that the
-    // sensor dropped data).
-    if(lastSampleTime)
-    {
-      uint32_t gap = now - lastSampleTime;
-      if(gap > maxGapUs)
-        maxGapUs = gap;
-      // [DIAG] Correlate big gaps (> 2 ms) with the writer's SPI write windows.
-      // The gap spans [lastSampleTime, now]. If the last write window [gWriteStart,
-      // gWriteEnd] overlaps it, the SPI activity likely caused the preemption.
-      if(gap > 2000)
+      // If the FIFO is full (1024) it has likely overflowed -- we fell behind.
+      // Count it and reset so we resync the sequence.
+      if(fifoBytes >= 1024)
       {
-        bigGaps++;
-        uint32_t ws = gWriteStart, we = gWriteEnd;
-        // Overlap if the write window intersects [lastSampleTime, now].
-        if(ws < now && we > lastSampleTime)
-          bigGapsDuringWrite++;
+        fifoOverflows++;
+        M5.In_I2C.writeRegister8(0x68, 0x23, 0x01, 400000); // FIFO_RESET
+        seq = 0; // resync: next drained packet is the new t=0 baseline
+        lastFifoDrain = now;
+        continue;
       }
+
+      // Drain the FIFO in 512-byte chunks. Each chunk is ONE I2C transaction
+      // (pointer->0x2C, then read up to 512 bytes), which is far cheaper than
+      // reading 14-byte packets one at a time (the per-transaction overhead was
+      // what made a burst take ~27 ms). 512 bytes = 36 full 14-byte packets.
+      uint32_t tI2cStart = micros();
+      uint32_t got = 0;
+      while(fifoBytes >= 14)
+      {
+        // How many whole packets are available, and how many bytes to pull this
+        // transaction: up to 36 packets (504 bytes, under the 512-byte I2C max),
+        // and no more than is actually in the FIFO. Reading whole packets keeps
+        // the FIFO stream aligned (we never read a partial 14-byte packet).
+        uint32_t availPkts = fifoBytes / 14;
+        uint32_t pktsThisTx = (availPkts > 36) ? 36 : availPkts;
+        size_t chunk = (size_t)pktsThisTx * 14;
+        // Read the chunk from the FIFO stream (0x2C auto-advances).
+        if(!M5.In_I2C.readRegister(0x68, 0x2C, fifoBuf, chunk, 400000))
+        {
+          i2cFails++;
+          break;
+        }
+        fifoBytes -= (uint16_t)chunk;
+        size_t full = chunk; // always a whole number of packets now
+        for(size_t p = 0; p < full; p += 14)
+        {
+          int16_t rawAx = (int16_t)((fifoBuf[p + 0] << 8) | fifoBuf[p + 1]);
+          int16_t rawAy = (int16_t)((fifoBuf[p + 2] << 8) | fifoBuf[p + 3]);
+          int16_t rawAz = (int16_t)((fifoBuf[p + 4] << 8) | fifoBuf[p + 5]);
+          int16_t rawGx = (int16_t)((fifoBuf[p + 8] << 8) | fifoBuf[p + 9]);
+          int16_t rawGy = (int16_t)((fifoBuf[p + 10] << 8) | fifoBuf[p + 11]);
+          int16_t rawGz = (int16_t)((fifoBuf[p + 12] << 8) | fifoBuf[p + 13]);
+
+          // t is the packet's 1 ms index (seq), so it stays gap-free and
+          // accurate even when we drain a burst of samples after a stall.
+          char row[64];
+          int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            (unsigned long)seq,
+            (long)rawGx, (long)rawGy, (long)rawGz,
+            (long)rawAx, (long)rawAy, (long)rawAz);
+          if(xSemaphoreTake(ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+          {
+            ring.write((const uint8_t*)row, (size_t)n);
+            xSemaphoreGive(ringMutex);
+          }
+          samples++;
+          seq++;
+          got++;
+        }
+      }
+      uint32_t i2cDur = micros() - tI2cStart;
+      if(i2cDur > maxI2cDurUs)
+        maxI2cDurUs = i2cDur;
+      // A burst of N packets means we were stalled for ~N ms (the FIFO held the
+      // samples). Track the largest burst and correlate big bursts with the
+      // writer's SPI write windows (the same correlation the old gap-tracking did).
+      if(got > maxBurst)
+        maxBurst = got;
+      if(got > 2)
+      {
+        bigBursts++;
+        uint32_t ws = gWriteStart, we = gWriteEnd;
+        // The burst spans roughly [lastFifoDrain, now]; if a write window
+        // overlaps it, the SPI activity likely caused the stall.
+        if(ws < now && we > lastFifoDrain)
+          bigBurstsDuringWrite++;
+      }
+      lastFifoDrain = micros();
+      if(dataSem)
+        xSemaphoreGive(dataSem);
     }
-    lastSampleTime = now;
+    else
+    {
+      // No data in the FIFO yet; the loop spins and re-polls. This is fine --
+      // the FIFO paces us at 1 kHz.
+    }
 
     // Once per second: check heap integrity + report progress.
     if(now - lastHeapCheck >= 1000000)
@@ -4775,9 +4912,9 @@ static void imuSdWriteTest()
       uint32_t pct = expected ? (samples * 100) / expected : 0;
       // [DIAG] Time the serial print too (115200 baud is slow for long lines).
       uint32_t tSer = micros();
-      Serial.printf("  t=%lu ms  samples=%lu (expect %lu, %lu%%)  i2cFails=%lu  maxGap=%lu us  ring=%lu  written=%lu/%lu  heap=%s\n",
+      Serial.printf("  t=%lu ms  samples=%lu (expect %lu, %lu%%)  i2cFails=%lu  fifoOvfl=%lu  maxBurst=%lu  ring=%lu  written=%lu/%lu  heap=%s\n",
         (unsigned long)elapsedMs, (unsigned long)samples, (unsigned long)expected, (unsigned long)pct,
-        (unsigned long)i2cFails, (unsigned long)maxGapUs,
+        (unsigned long)i2cFails, (unsigned long)fifoOverflows, (unsigned long)maxBurst,
         (unsigned long)ring.bytesUsed(), (unsigned long)writtenBytes, (unsigned long)kTarget,
         ok ? "OK" : "CORRUPT");
       uint32_t serDur = micros() - tSer;
@@ -4840,25 +4977,28 @@ static void imuSdWriteTest()
   if(!finalOk && !heapFail)
     heapFail = true;
 
-  // Overall capture rate: at 1 kHz we expect elapsedMs samples. If this is
-  // well under 100%, we are missing frames -- and maxGapUs tells us whether it
-  // was I2C failures (i2cFails high) or the loop being stalled (maxGap large).
+  // Overall capture rate: at 1 kHz we expect elapsedMs samples. With the FIFO,
+  // a shortfall now means either a FIFO overflow (samples lost, fifoOverflows>0)
+  // or I2C failures (i2cFails>0) -- not a sampler stall, because the FIFO holds
+  // the in-between samples.
   uint32_t expectedTotal = elapsedMs;
   uint32_t pctTotal = expectedTotal ? (samples * 100) / expectedTotal : 0;
 
-  Serial.printf("\nIMU SD WRITE TEST done (write=%d): %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, maxGap=%lu us, heap %s\n",
+  Serial.printf("\nIMU SD WRITE TEST done (write=%d, FIFO): %lu samples in %lu ms (expect %lu, %lu%% of 1 kHz), %lu i2c failures, fifoOverflows=%lu, heap %s\n",
     SD_TEST_WRITE, (unsigned long)samples, (unsigned long)elapsedMs, (unsigned long)expectedTotal, (unsigned long)pctTotal,
-    (unsigned long)i2cFails, (unsigned long)maxGapUs, heapFail ? "CORRUPT" : "OK");
-  Serial.printf("  [stall suspects] maxI2cDur=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us  maxIter(loop period)=%lu us\n",
+    (unsigned long)i2cFails, (unsigned long)fifoOverflows, heapFail ? "CORRUPT" : "OK");
+  Serial.printf("  [stall suspects] maxFifoDrain=%lu us  maxHeapCheck=%lu us  maxSerial=%lu us  maxIter(loop period)=%lu us\n",
     (unsigned long)maxI2cDurUs, (unsigned long)maxHeapCheckUs, (unsigned long)maxSerialUs, (unsigned long)maxIterUs);
-  Serial.printf("  [correlation] bigGaps(>2ms)=%lu  overlapped a writer SPI write=%lu  writer writes=%lu  maxWriteDur=%lu us\n",
-    (unsigned long)bigGaps, (unsigned long)bigGapsDuringWrite, (unsigned long)gWriteCount, (unsigned long)gMaxWriteDurUs);
+  Serial.printf("  [FIFO] maxBurst(=stall ms)=%lu  bigBursts(>2)=%lu  overlapped a writer SPI write=%lu  writer writes=%lu  maxWriteDur=%lu us\n",
+    (unsigned long)maxBurst, (unsigned long)bigBursts, (unsigned long)bigBurstsDuringWrite, (unsigned long)gWriteCount, (unsigned long)gMaxWriteDurUs);
 #if SD_TEST_WRITE
   Serial.printf("  wrote %lu bytes (file on card %s = %lu bytes)\n",
     (unsigned long)writtenBytes, path, (unsigned long)finalSize);
 #endif
-  if(pctTotal < 95 && i2cFails == 0)
-    Serial.println("  -> NOT a constant 1 kHz rate, but no I2C failures: the loop was STALLED (something else on the loop task blocked the sampler).");
+  if(fifoOverflows > 0)
+    Serial.printf("  -> FIFO overflowed %lu time(s): the sampler was too slow to drain the FIFO (a stall longer than the 73-sample buffer). Samples in those windows were LOST.\n", (unsigned long)fifoOverflows);
+  else if(pctTotal < 95 && i2cFails == 0)
+    Serial.println("  -> Under 100%% but no FIFO overflow and no I2C failures: the FIFO held the in-between samples, so the shortfall is from the 1 kHz ODR itself (DLPF) or the I2C poll cadence, not lost data.");
   else if(i2cFails > 0)
     Serial.println("  -> I2C read failures present: the sensor reads themselves are failing (bus/timing).");
   Serial.println(heapFail ? "=== IMU SD WRITE TEST: HEAP CORRUPTED (SdFat write path is the corruptor) ==="
