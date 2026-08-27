@@ -4347,7 +4347,7 @@ static void imuSampleTest()
 #endif
 // How long (seconds) the E2E test records before stopping.
 #ifndef GYRO_E2E_DURATION_S
-#define GYRO_E2E_DURATION_S 10
+#define GYRO_E2E_DURATION_S 20
 #endif
 // How long (ms) to wait after boot before the E2E test triggers the record
 // start, so the UI/camera-connection code has a moment to settle.
