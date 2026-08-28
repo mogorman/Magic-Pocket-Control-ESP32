@@ -1136,6 +1136,9 @@ void GyroLogWriter::samplerTask()
 
         // [DIAG] Once per second, report the loop rate and the I2C read time
         // distribution, to see how close to 1 kHz we are and where time goes.
+        // (Temporarily disabled to let the E2E verify output through the serial
+        // buffer; re-enable to watch the per-second rate.)
+#if 0
         {
             static uint32_t dLast = 0;
             static uint32_t dLoops = 0, dReadUs = 0, dMaxRead = 0;
@@ -1151,6 +1154,7 @@ void GyroLogWriter::samplerTask()
                 dLast = now; dLoops = 0; dReadUs = 0; dMaxRead = 0;
             }
         }
+#endif
 
         // Advance to the next 1 ms boundary. We do NOT vTaskDelay here: a
         // vTaskDelay(1) waits a full tick (~1 ms), which -- added on top of the
