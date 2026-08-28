@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <vector>
 #include <memory>
+#include <functional>
 #include "Arduino_DebugUtils.h"
 #include "Camera/BMDCamera.h"
 #include "CCU/CCUPacketTypes.h"
@@ -186,6 +187,16 @@ public:
     bool hasTransportMode();
     TransportInfo getTransportMode();
 
+    // Fired when the recording state changes (true = started recording, false = stopped).
+    // Optional; only invoked if a handler has been registered.
+    void setOnRecordingStateChanged(std::function<void(bool)> handler) { onRecordingStateChanged = std::move(handler); }
+
+    // Fired whenever the camera pushes a slate name (Metadata/SlateForName).
+    // The camera sends the real clip file name (e.g. "A010_08260408_C022")
+    // when a clip is played back, which is how we learn the name of the clip
+    // that was just recorded. Optional; only invoked if a handler is set.
+    void setOnSlateNameReceived(std::function<void(const std::string&)> handler) { onSlateNameReceivedCb = std::move(handler); }
+
 
     // Metadata Attributes
 
@@ -355,6 +366,10 @@ private:
     // Display Attributes
     std::shared_ptr<CCUPacketTypes::DisplayTimecodeSource> timecodeSource;
     std::shared_ptr<std::string> timecode;
+
+    // Recording state change callback (optional)
+    std::function<void(bool)> onRecordingStateChanged;
+    std::function<void(const std::string&)> onSlateNameReceivedCb;
 };
 
 #endif

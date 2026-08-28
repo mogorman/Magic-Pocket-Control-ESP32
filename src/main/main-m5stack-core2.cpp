@@ -125,7 +125,8 @@ enum class Screens : byte
   Media = 108,
   Lens = 109,
   Slate = 110,
-  Project = 111
+  Project = 111,
+  GyroLog = 112
 };
 
 Screens connectedScreenIndex = Screens::NoConnection; // The index of the screen we're on:
@@ -141,6 +142,7 @@ Screens connectedScreenIndex = Screens::NoConnection; // The index of the screen
 // 107 is Resolution (one for each camera group, 4K, 6K/G2/Pro, Mini Pro G2, Mini Pro 12K)
 // 108 is Media
 // 109 is Lens
+// 112 is Gyro Log (default page when connected)
 // 124 is WB / Tint - Edit Tint
 
 // Keep track of the last camera modified time that we refreshed a screen so we don't keep refreshing a screen when the camera object remains unchanged.
@@ -149,6 +151,32 @@ static unsigned long lastRefreshedScreen = 0;
 // Button pressed indications for use in each individual page
 bool btnAPressed = false;
 bool btnBPressed = false;
+
+// To learn the real name of the clip that was just recorded, we briefly switch
+// the camera into PLAYBACK mode right after a clip stops. The camera then
+// pushes the clip's file name (e.g. "A010_08260408_C022") over CCU, which we
+// use to display on the Gyro Log screen. Once the name is received we switch
+// the camera back to its previous (preview) state.
+//
+// The clip-name capture is a single boolean, not a multi-state machine:
+//   * On a genuine record stop we flip the camera into PLAYBACK and set
+//     gyroInPlayback to true.
+//   * While gyroInPlayback is true we wait for the camera to push the real
+//     clip name (it does so repeatedly while in playback). The first real name
+//     is stored and we flip the camera back to PREVIEW and clear the flag.
+//   * A 6-second timeout does the same in case no name arrives.
+//   * The record start/stop callbacks ignore everything while gyroInPlayback is
+//     set, so the playback/preview toggling we do ourselves can't re-trigger
+//     them. The next genuine record stop simply sets the flag again.
+//
+// All the actual BLE writes happen in the main loop (never the notify
+// handler, where a blocking write would deadlock).
+static bool gyroInPlayback = false;
+
+// The real clip name (file name without extension) received from the camera
+// during playback, queued for the main loop to display.
+static std::string gyroPendingSlateName;
+static bool gyroPendingSlateNameValid = false;
 
 // Display elements on the screen common to all pages
 void Screen_Common(int sideBarColour)
@@ -230,6 +258,15 @@ void Screen_Common(int sideBarColour)
           case Screens::Lens:
             sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
             sprite->drawCenterString("FOCUS", 70, 217, &AgencyFB_Bold9pt7b);
+            break;
+          case Screens::GyroLog:
+            // A = previous orientation, B = next orientation (calibration),
+            // C = next screen.
+            sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
+            sprite->drawCenterString("< ORIENT", 70, 217, &AgencyFB_Bold9pt7b);
+
+            sprite->fillSmoothRoundRect(120, 210, 80, 40, 3, TFT_DARKCYAN);
+            sprite->drawCenterString("ORIENT >", 160, 217, &AgencyFB_Bold9pt7b);
             break;
         }
       }
@@ -646,6 +683,160 @@ void Screen_Recording(bool forceRefresh = false)
       sprite->setTextColor(TFT_RED);
       sprite->drawString("RECORD ERROR", 30, 20);
     }
+  }
+
+  sprite->pushSprite(0, 0);
+}
+
+// The Gyro Log screen. This is the default page when connected.
+//
+// It has two modes:
+//   * Calibration mode (default): shows the live gyro (rad/s) and accel (g)
+//     values so the user can lay the unit flat. A/B step the GCSV orientation.
+//   * Summary mode (after a clip has been recorded): shows the duration, the
+//     running timecode, the .gcsv file name, the file size written, and the
+//     remaining space on the SD card.
+//
+// While a clip is actively being recorded the screen is turned off (the IMU
+// is being sampled and written to the SD card), so this screen is blank by
+// design during that time.
+void Screen_GyroLog(bool forceRefresh = false)
+{
+  if(!BMDControlSystem::getInstance()->hasCamera())
+    return;
+
+  connectedScreenIndex = Screens::GyroLog;
+
+  auto camera = BMDControlSystem::getInstance()->getCamera();
+
+  // Handle the A/B buttons: step the GCSV orientation (calibration).
+  bool tappedAction = false;
+  if(btnAPressed || btnBPressed)
+  {
+    DEBUG_DEBUG("GyroLog: Btn A/B pressed (orientation)");
+
+    int idx = gyroLog.getOrientationIndex();
+    if(btnAPressed)
+      idx = (idx - 1 + GyroLogWriter::kOrientationCount) % GyroLogWriter::kOrientationCount;
+    else
+      idx = (idx + 1) % GyroLogWriter::kOrientationCount;
+
+    gyroLog.setOrientationIndex(idx);
+    tappedAction = true;
+  }
+
+  // While actively recording the screen is turned off (the IMU is being
+  // sampled and written to the SD card). Don't draw anything and don't touch
+  // the display while in this state.
+  if(gyroLog.isRecording())
+    return;
+
+  // The live IMU values change constantly, so always refresh unless the screen
+  // content is unchanged and nothing was pressed.
+  if(!forceRefresh && !tappedAction && lastRefreshedScreen == camera->getLastModified())
+    return;
+  lastRefreshedScreen = camera->getLastModified();
+
+  sprite->fillSprite(TFT_BLACK);
+
+  Screen_Common_Connected(); // Common elements
+
+  // Title
+  sprite->setTextColor(TFT_WHITE);
+  sprite->drawString("GYRO LOG", 30, 9, &AgencyFB_Bold9pt7b);
+
+  // M5GFX, set font here rather than on each drawString line
+  sprite->setFont(&Lato_Regular11pt7b);
+
+  if(gyroLog.getSummary().valid)
+  {
+    // Summary mode: show the details of the last clip written.
+    const GyroLogWriter::Summary& s = gyroLog.getSummary();
+
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("LAST CLIP", 30, 40, &Lato_Regular5pt7b);
+
+    // File name
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(s.fileName.c_str(), 30, 55, &Lato_Regular6pt7b);
+
+    // Duration
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("DURATION", 30, 95, &Lato_Regular5pt7b);
+    char durBuf[32];
+    snprintf(durBuf, sizeof(durBuf), "%02lu:%02lu.%02lu",
+      (unsigned long)(s.durationMs / 60000),
+      (unsigned long)((s.durationMs / 1000) % 60),
+      (unsigned long)((s.durationMs / 10) % 100));
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(durBuf, 30, 108, &Lato_Regular11pt7b);
+
+    // Timecode at end
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("TIMECODE (END)", 30, 145, &Lato_Regular5pt7b);
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(s.timecodeAtEnd.c_str(), 30, 158, &Lato_Regular11pt7b);
+
+    // File size
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("FILE SIZE", 30, 185, &Lato_Regular5pt7b);
+    char sizeBuf[32];
+    snprintf(sizeBuf, sizeof(sizeBuf), "%.2f MB", (double)s.fileSizeBytes / (1024.0 * 1024.0));
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(sizeBuf, 30, 198, &Lato_Regular11pt7b);
+
+    // Remaining SD space
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("SD FREE", 180, 185, &Lato_Regular5pt7b);
+    char freeBuf[32];
+    snprintf(freeBuf, sizeof(freeBuf), "%.1f GB", (double)s.freeBytes / (1024.0 * 1024.0 * 1024.0));
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(freeBuf, 180, 198, &Lato_Regular11pt7b);
+  }
+  else
+  {
+    // Calibration mode: show the live IMU values and the current orientation.
+    // We use M5Unified's calibrated, axis-ordered getGyro()/getAccel() here (not
+    // gyroLog.readImu, which reads the raw registers directly) so the numbers
+    // shown match what the user sees for orientation. The 256 us throttle in
+    // those getters is fine for a calibration display.
+    float gx, gy, gz, ax, ay, az;
+    M5.Imu.getGyro(&gx, &gy, &gz);
+    M5.Imu.getAccel(&ax, &ay, &az);
+
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("GYRO (rad/s)", 30, 40, &Lato_Regular5pt7b);
+    char gBuf[64];
+    snprintf(gBuf, sizeof(gBuf), "x %7.3f  y %7.3f  z %7.3f", gx, gy, gz);
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(gBuf, 30, 53, &Lato_Regular11pt7b);
+
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("ACCEL (g)", 30, 95, &Lato_Regular5pt7b);
+    char aBuf[64];
+    snprintf(aBuf, sizeof(aBuf), "x %7.3f  y %7.3f  z %7.3f", ax, ay, az);
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(aBuf, 30, 108, &Lato_Regular11pt7b);
+
+    // Current orientation token (with its index, so it can be reported back)
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("ORIENTATION", 30, 150, &Lato_Regular5pt7b);
+    sprite->setTextColor(TFT_CYAN);
+    char orientBuf[24];
+    snprintf(orientBuf, sizeof(orientBuf), "%s  (#%d)",
+      GyroLogWriter::orientationToken(gyroLog.getOrientationIndex()),
+      gyroLog.getOrientationIndex());
+    sprite->drawString(orientBuf, 30, 163, &Lato_Regular11pt7b);
+
+    // Hint
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
+
+    // SD card status diagnostic (top-right). Green when ready, red otherwise.
+    sprite->setTextColor(TFT_LIGHTGREY);
+    sprite->drawString("SD CARD", 230, 40, &Lato_Regular5pt7b);
+    sprite->setTextColor(gyroLog.sdReady() ? TFT_GREEN : TFT_RED);
+    sprite->drawString(gyroLog.sdStatusMessage().c_str(), 230, 53, &Lato_Regular6pt7b);
   }
 
   sprite->pushSprite(0, 0);
@@ -3726,9 +3917,25 @@ void Screen_Lens(bool forceRefresh = false)
   sprite->pushSprite(0, 0);
 }
 
+// Bump the MPU6886 output data rate from M5Unified's default 500 Hz to
+// 1 kHz. M5Unified's MPU6886_Class::begin() leaves SMPLRT_DIV = 0x03
+// (1/4 divider -> 500 Hz) with CONFIG = 0x01 (44 Hz DLPF). Writing
+// SMPLRT_DIV = 0x00 (no divider) raises the ODR to the sensor's native
+// 1 kHz, which is what the GCSV logger needs. This is the same trick as
+// the Hackaday "Good Vibrations" log: only the sample-rate divider is
+// changed, everything else (DLPF, FSR) stays as M5Unified configured it.
+// The GCSV timestamps come from the camera timecode, not the IMU, so a
+// faster ODR just means more samples per second to record.
+static void setImu1kHz()
+{
+  M5.In_I2C.writeRegister8(0x68, 0x19, 0x00, 400000);  // SMPLRT_DIV = 0 -> 1 kHz
+}
+
 void setup() {
 
   M5.begin();
+
+  setImu1kHz();
 
   tft.setColorDepth(16);
   tft.setSwapBytes(true);
@@ -3780,6 +3987,10 @@ void setup() {
 
   // Prepare for Bluetooth connections and start scanning for cameras
   cameraConnection.initialise(&tft, IWIDTH, IHEIGHT); // Screen Pass Key entry
+
+  // When the connected camera's recording state changes, start/stop the gyro
+  // log. The camera object is created when a connection is established, so we
+  // register the handler lazily in loop() once a camera exists (see below).
 }
 
 int memoryLoopCounter;
@@ -3811,6 +4022,84 @@ void loop() {
   else if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
     auto camera = BMDControlSystem::getInstance()->getCamera();
+
+    // Register the recording-state callback once we have a camera object.
+    // (The camera is created when a connection is established, so this is
+    // done here rather than in setup().)
+    static bool gyroCallbackRegistered = false;
+    if(!gyroCallbackRegistered)
+    {
+      gyroCallbackRegistered = true;
+      camera->setOnRecordingStateChanged([](bool recording)
+      {
+        auto cam = BMDControlSystem::getInstance()->getCamera();
+
+        // The slate name the camera currently reports. The camera sends
+        // "Next Clip" as a placeholder (it has no real clip name yet), so we
+        // treat that as "no name".
+        std::string slate;
+        if(cam->hasSlateName())
+          slate = cam->getSlateName();
+        bool slateIsPlaceholder = (slate == "Next Clip" || slate == "next clip" || slate.empty());
+
+        DEBUG_INFO("== REC %s ==  slate='%s' (placeholder=%d)  timecode='%s'",
+          recording ? "START" : "STOP",
+          slate.c_str(),
+          (int)slateIsPlaceholder,
+          cam->getTimecodeString().c_str());
+
+        // While we are in playback reading the clip name, the camera toggles
+        // between record/preview/play as we drive it. Ignore all of that; the
+        // real start/stop of the *next* clip will arrive once we've flipped
+        // back to record.
+        if(gyroInPlayback)
+          return;
+
+        if(recording)
+        {
+          // ---- RECORD START ----
+          // Turn the display off while recording.
+          tft.setBrightness(0);
+        }
+        else
+        {
+          // ---- RECORD STOP ----
+          // Flip the camera into playback (from the main loop) so it reports
+          // the real clip name. Mark that we're in the playback-reading phase.
+          gyroInPlayback = true;
+
+          // Bring the display back on and force a refresh of the screen.
+          tft.setBrightness(127);
+          lastRefreshedScreen = 0;
+        }
+      });
+
+      // Register a handler for the slate name the camera pushes. When we have
+      // just switched the camera into playback to learn the clip name, this is
+      // where the real file name (e.g. "A010_08260408_C022") arrives. We use it
+      // to rename the GCSV, then tell the main loop to switch the camera back.
+      camera->setOnSlateNameReceived([](const std::string& name)
+      {
+        // Only act while we are in playback reading the clip name, and only on
+        // a real name (not the "Next Clip" placeholder the camera sends at
+        // other times). The camera re-sends the name repeatedly while in
+        // playback, so once we've used it we flip back to record and clear
+        // gyroInPlayback; any further repeats are then ignored.
+        if(!gyroInPlayback)
+          return;
+        if(name == "Next Clip" || name == "next clip" || name.empty())
+          return;
+
+        DEBUG_INFO("[GYRO] got clip name from playback: '%s'", name.c_str());
+
+        // Queue the real clip name for the main loop to apply.
+        gyroPendingSlateName = name;
+        gyroPendingSlateNameValid = true;
+
+        // We have the name; tell the main loop to flip back to record.
+        gyroInPlayback = false;
+      });
+    }
 
     if(static_cast<byte>(connectedScreenIndex) >= 100)
     {
@@ -3854,6 +4143,9 @@ void loop() {
         case Screens::Lens:
           Screen_Lens();
           break;
+        case Screens::GyroLog:
+          Screen_GyroLog();
+          break;
       }
     }
     else
@@ -3870,8 +4162,12 @@ void loop() {
     if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::FailedPassKey)
       DEBUG_DEBUG("Loop - Failed Pass Key");
 
-    // Clear the screen so we can show the dashboard cleanly
+    // Clear the screen so we can show the default screen cleanly
     tft.fillScreen(TFT_BLACK);
+
+    // Land on the Gyro Log screen (the new default page) when connected.
+    connectedScreenIndex = Screens::GyroLog;
+    lastRefreshedScreen = 0;
 
     lastConnectedTime = currentTime;
   }
@@ -3919,6 +4215,7 @@ void loop() {
         case Screens::Framerate:
         case Screens::Media:
         case Screens::Lens:
+        case Screens::GyroLog:
           // Indicate to the other screens the first button has been pressed
           btnAPressed = true;
           break;
@@ -3970,6 +4267,7 @@ void loop() {
         case Screens::Framerate:
         case Screens::Media:
         case Screens::Lens:
+        case Screens::GyroLog:
           // Indicate to the other screens the second button has been pressed
           btnBPressed = true;
           break;
@@ -3981,6 +4279,9 @@ void loop() {
 
       switch(connectedScreenIndex)
       {
+        case Screens::GyroLog:
+          connectedScreenIndex = Screens::Dashboard;
+          break;
         case Screens::Dashboard:
           connectedScreenIndex = Screens::Recording;
           break;
@@ -4017,6 +4318,67 @@ void loop() {
       }
 
       lastRefreshedScreen = 0; // Forces a refresh
+    }
+  }
+
+  // ---- Clip-name capture via playback ----
+  // Driven entirely by the single gyroInPlayback flag:
+  //   * just after a record stop we set it and (below) flip the camera into
+  //     playback so it reports the real clip name;
+  //   * the slate callback clears it once the name arrives;
+  //   * a 6s timeout clears it too, in case no name ever arrives.
+  // Whichever clears it, we then flip the camera back to preview. All the BLE
+  // writes happen here in the main loop, never the notify handler.
+  static bool gyroPlaybackCommandSent = false;
+  static unsigned long gyroPlaybackWaitStart = 0;
+
+  if(gyroInPlayback &&
+     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
+  {
+    // 1) Send the playback command once, right after the record stop.
+    if(!gyroPlaybackCommandSent)
+    {
+      gyroPlaybackCommandSent = true;
+      gyroPlaybackWaitStart = currentTime;
+      auto cam = BMDControlSystem::getInstance()->getCamera();
+      if(cam && cam->hasTransportMode())
+      {
+        TransportInfo ti = cam->getTransportMode();
+        ti.mode = CCUPacketTypes::MediaTransportMode::Play;
+        DEBUG_INFO("[GYRO] switching camera to PLAYBACK to read clip name");
+        PacketWriter::writeTransportInfo(ti, &cameraConnection);
+      }
+      else
+      {
+        DEBUG_ERROR("[GYRO] no transport mode; can't switch to playback");
+        gyroInPlayback = false;
+      }
+    }
+
+    // 2) If no clip name has arrived within 6s, give up and flip back.
+    if(gyroInPlayback && currentTime - gyroPlaybackWaitStart > 6000)
+    {
+      DEBUG_INFO("[GYRO] no clip name after 6s in playback; switching back");
+      gyroInPlayback = false;
+    }
+  }
+
+  // 3) Whenever we leave the playback-reading phase (name received or timeout),
+  //    flip the camera back to PREVIEW. We must NOT use Record here: on a BMD
+  //    camera, setting the transport mode to Record immediately *starts* a new
+  //    clip, so "switching back to Record" would fire off a fresh recording.
+  //    Preview is the idle standby state the camera sits in between clips.
+  if(!gyroInPlayback && gyroPlaybackCommandSent &&
+     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
+  {
+    gyroPlaybackCommandSent = false;
+    auto cam = BMDControlSystem::getInstance()->getCamera();
+    if(cam && cam->hasTransportMode())
+    {
+      TransportInfo ti = cam->getTransportMode();
+      ti.mode = CCUPacketTypes::MediaTransportMode::Preview;
+      DEBUG_INFO("[GYRO] switching camera back to Preview");
+      PacketWriter::writeTransportInfo(ti, &cameraConnection);
     }
   }
 

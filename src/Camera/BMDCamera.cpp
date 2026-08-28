@@ -948,6 +948,9 @@ void BMDCamera::onTransportModeReceived(TransportInfo inTransportMode)
         #if OUTPUT_CAMERA_SETTINGS == 1
             DEBUG_INFO(">>Recording:%s", isRecording ? "Yes" : "No");
         #endif
+
+        if(onRecordingStateChanged)
+            onRecordingStateChanged(isRecording);
     }
 }
 bool BMDCamera::hasTransportMode()
@@ -1270,8 +1273,11 @@ void BMDCamera::onSlateNameReceived(std::string inSlateName)
         slateName->assign(inSlateName);
     else
         slateName = std::make_shared<std::string>(inSlateName);
-    
+
     modified();
+
+    if(onSlateNameReceivedCb)
+        onSlateNameReceivedCb(inSlateName);
 }
 bool BMDCamera::hasSlateName()
 {
