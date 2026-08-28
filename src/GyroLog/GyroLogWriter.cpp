@@ -156,15 +156,26 @@ bool GyroLogWriter::end()
     _summary.fileName = _startedName + ".txt";
     _summary.videoFileName = _startedName + "." + _extension;
     _summary.fileSizeBytes = _finalFileSize;
-    // Report total space on the card for the screen. We read it from the FAT
-    // boot sector (cluster count x bytes-per-cluster) -- cheap, no FAT walk. We
-    // deliberately do NOT compute free space: freeClusterCount() walks the entire
-    // FAT (tens of seconds on a FAT32 card) and would hang the stop path.
+    // Report total and free space on the card for the screen. Total comes from
+    // the FAT boot sector (cluster count x bytes-per-cluster) -- cheap. Free
+    // space comes from freeClusterCount(); on a FAT32 card that walks the whole
+    // FAT, so we time it and report how long it took (the original branch
+    // avoided it because it hung ~99s, but that was with the full GCSV writer
+    // load -- measure it here for the lightweight text-file path).
     if(_sd.fatType() != 0)
     {
         uint32_t bpc = _sd.bytesPerCluster();
         _summary.totalBytes = (uint64_t)_sd.clusterCount() * bpc;
-        _summary.freeBytes = 0;
+
+        uint32_t tFree = micros();
+        int32_t freeClusters = _sd.freeClusterCount();
+        uint32_t freeMs = (uint32_t)((micros() - tFree) / 1000UL);
+        if(freeClusters > 0)
+            _summary.freeBytes = (uint64_t)freeClusters * bpc;
+        else
+            _summary.freeBytes = 0;
+        DEBUG_INFO("[GYRO] end(): freeClusterCount=%ld, took %lu ms",
+          (long)freeClusters, (unsigned long)freeMs);
     }
 
     DEBUG_INFO("[GYRO] end(): closed '%s', size=%lu bytes", _gcsvPath.c_str(), (unsigned long)_finalFileSize);
