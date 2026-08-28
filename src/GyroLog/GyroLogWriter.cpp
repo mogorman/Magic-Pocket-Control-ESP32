@@ -354,9 +354,14 @@ static const uint32_t kImuI2cHz = 400000;
 
 bool GyroLogWriter::configureFifo(int smplrtDiv)
 {
-    // Wake the sensor and select the PLL gyro-X clock (PWR_MGMT_1 = 0x40:
-    // bit6 = PLL gyro X, SLEEP clear) for stable timing.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x40, kImuI2cHz);
+    // Wake the sensor and select the clock source. Per the MPU-6886 datasheet
+    // (DS-000193 v1.1) section 9.6, CLKSEL[2:0] MUST be 001 (auto-select: PLL
+    // gyro clock if ready, else internal oscillator) for full performance. The
+    // value 0x01 sets CLKSEL=001 and leaves SLEEP/CYCLE/GYRO_STANDBY/TEMP_DIS
+    // all clear. (An earlier attempt used 0x40, which is GYRO_STANDBY with
+    // CLKSEL=000 = internal 20 MHz oscillator only -- that leaves the sensor's
+    // data path not running, so the FIFO never fills.)
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, kImuI2cHz);
     delay(10); // let the PLL lock
 
     // Sample-rate divider. 0 = no divider = the sensor's native rate.
@@ -382,8 +387,8 @@ bool GyroLogWriter::configureFifo(int smplrtDiv)
     uint8_t user = M5.In_I2C.readRegister8(kImuAddr, 0x6A, kImuI2cHz);
     uint8_t cntHi = M5.In_I2C.readRegister8(kImuAddr, 0x72, kImuI2cHz);
     uint8_t cntLo = M5.In_I2C.readRegister8(kImuAddr, 0x73, kImuI2cHz);
-    DEBUG_INFO("[GYRO] configureFifo readback: WHO_AM_I=0x%02X PWR=0x%02X SMPL=0x%02X CFG=0x%02X FIFO_EN=0x%02X USER=0x%02X FIFO_COUNT=%u",
-        who, pwr, smpl, cfg, fifoEn, user, (cntHi << 8) | cntLo);
+    DEBUG_INFO("[GYRO] configureFifo readback: WHO_AM_I=0x%02X PWR=0x%02X (CLKSEL=%d) SMPL=0x%02X CFG=0x%02X FIFO_EN=0x%02X USER=0x%02X FIFO_COUNT=%u",
+        who, pwr, (pwr & 0x07), smpl, cfg, fifoEn, user, (cntHi << 8) | cntLo);
 
     // Also read raw output-register samples to confirm the sensor is producing
     // changing data (independent of the FIFO). Read gyro (0x43) five times,
