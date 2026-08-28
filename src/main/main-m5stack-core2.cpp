@@ -179,9 +179,62 @@ static bool gyroInPlayback = false;
 static std::string gyroPendingSlateName;
 static bool gyroPendingSlateNameValid = false;
 
-// Gyro log (GCSV) writer for the Core2's MPU6886. (Currently a stub; the full
-// 1 kHz sampling + SD writing is ported in a later step.)
+// A queued "start a new gyro log" request, set by the record-start callback
+// and applied by the main loop (begin() does SD work and must not run on the
+// BLE notify thread).
+struct GyroPendingStart
+{
+  std::string clipName;
+  std::string ext;
+  std::string timecode;
+  bool valid = false;
+};
+static GyroPendingStart gyroPendingStart;
+
+// Set by the record-stop callback to ask the main loop to finalise the log
+// (end() does a blocking SD unmount/remount and must not run on the BLE
+// notify thread while the main loop may be touching the same card).
+static bool gyroPendingEnd = false;
+
+// The codec in effect when the clip started, so we can build the right video
+// file extension once we have the real clip name.
+static CCUPacketTypes::BasicCodec gyroStartCodec = CCUPacketTypes::BasicCodec::BRAW;
+
+// Gyro log writer for the Core2's SD card. (Data side only for now: writes a
+// "hello world" text file per clip; the 1 kHz GCSV sampling is a later step.)
 GyroLogWriter gyroLog;
+
+// The generic clip-name counter used when the camera hasn't sent a slate name
+// yet (e.g. "clip_0001"). Kept in RAM for now (NVS persistence is a later
+// step).
+static uint32_t gyroClipCounter = 0;
+
+// Build the next generic clip name ("clip_0001", "clip_0002", ...).
+static std::string nextGyroClipName()
+{
+  gyroClipCounter++;
+  char buf[32];
+  snprintf(buf, sizeof(buf), "clip_%04lu", (unsigned long)gyroClipCounter);
+  return std::string(buf);
+}
+
+// Map the camera's current codec to the video file extension we'd pair the
+// gyro log with.
+static std::string gyroVideoExtension(BMDCamera* cam)
+{
+  if(cam && cam->hasCodec())
+  {
+    switch(cam->getCodec().basicCodec)
+    {
+      case CCUPacketTypes::BasicCodec::ProRes: return "mov";
+      case CCUPacketTypes::BasicCodec::RAW:    return "raw";
+      case CCUPacketTypes::BasicCodec::DNxHD:  return "mxf";
+      case CCUPacketTypes::BasicCodec::BRAW:   return "braw";
+      default: break;
+    }
+  }
+  return "braw";
+}
 
 // Display elements on the screen common to all pages
 void Screen_Common(int sideBarColour)
@@ -4030,6 +4083,37 @@ void loop() {
 
   unsigned long currentTime = millis();
 
+  // ---- Gyro log: apply queued SD work on the main loop thread ----
+  // The record start/stop callbacks (BLE notify thread) only set flags; the
+  // actual SD work (begin/end/applySlateName) runs here, on the same thread
+  // that will later sample, so there's no cross-thread race on the card.
+
+  // Start a new log (file created) if a record start was queued.
+  if(gyroPendingStart.valid)
+  {
+    gyroPendingStart.valid = false;
+    if(gyroLog.begin(gyroPendingStart.clipName, gyroPendingStart.ext, gyroPendingStart.timecode))
+      DEBUG_INFO("[GYRO] started log '%s'", gyroPendingStart.clipName.c_str());
+    else
+      DEBUG_INFO("[GYRO] failed to start log '%s' (SD not ready?)", gyroPendingStart.clipName.c_str());
+  }
+
+  // Finalise a just-stopped log (close file + commit to card).
+  if(gyroPendingEnd)
+  {
+    gyroPendingEnd = false;
+    if(gyroLog.end())
+      DEBUG_INFO("[GYRO] ended log '%s'", gyroLog.getSummary().fileName.c_str());
+  }
+
+  // Apply the real clip name (learned via playback) to the finalised log.
+  if(gyroPendingSlateNameValid && !gyroLog.isRecording())
+  {
+    gyroPendingSlateNameValid = false;
+    gyroLog.applySlateName(gyroPendingSlateName, gyroVideoExtension(BMDControlSystem::getInstance()->getCamera().get()));
+    DEBUG_INFO("[GYRO] applied slate name '%s' to log", gyroPendingSlateName.c_str());
+  }
+
   if ((cameraConnection.status == BMDCameraConnection::ConnectionStatus::Disconnected || cameraConnection.status == BMDCameraConnection::ConnectionStatus::FailedPassKey) && currentTime - lastConnectedTime >= reconnectInterval) {
     
     if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::Disconnected)
@@ -4085,12 +4169,32 @@ void loop() {
         if(recording)
         {
           // ---- RECORD START ----
+          // Remember the codec so we can build the right file extension later.
+          if(cam->hasCodec())
+            gyroStartCodec = cam->getCodec().basicCodec;
+
+          // Queue a new gyro log for the main loop to start. We do NOT call
+          // begin() here: it does SD work and must not run on this BLE notify
+          // thread. The main loop (same thread that will later sample) calls
+          // begin() next. We rename the log to the real clip name once the
+          // camera tells us (via playback) after the clip stops.
+          gyroPendingStart.clipName = nextGyroClipName();
+          gyroPendingStart.ext = gyroVideoExtension(cam.get());
+          gyroPendingStart.timecode = cam->getTimecodeString();
+          gyroPendingStart.valid = true;
+
           // Turn the display off while recording.
           tft.setBrightness(0);
         }
         else
         {
           // ---- RECORD STOP ----
+          // Record the end timecode, then ask the main loop to finalise the log
+          // (gyroPendingEnd). end() does a blocking SD unmount/remount and must
+          // not run on this BLE notify thread.
+          gyroLog.setTimecodeAtEnd(cam->getTimecodeString());
+          gyroPendingEnd = true;
+
           // Flip the camera into playback (from the main loop) so it reports
           // the real clip name. Mark that we're in the playback-reading phase.
           gyroInPlayback = true;
