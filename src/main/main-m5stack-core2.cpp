@@ -20,7 +20,7 @@
 #endif
 // How long (seconds) the E2E test records before stopping.
 #ifndef GYRO_E2E_DURATION_S
-#define GYRO_E2E_DURATION_S 10
+#define GYRO_E2E_DURATION_S 30
 #endif
 // How long (ms) to wait AFTER the camera is connected before the E2E test
 // triggers the record start, so the connection/SD code has a moment to settle.
