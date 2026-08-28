@@ -708,7 +708,7 @@ void GyroLogWriter::startWriterTask()
     // the task watchdog.) The writer only wakes every ~100 ms to flush a 16 KB
     // batch, so its brief SD writes don't meaningfully disturb the 1 kHz sampler;
     // the 128 KB ring absorbs the rest.
-    xTaskCreatePinnedToCore(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 16384,
+    xTaskCreatePinnedToCore(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
         this, 1, &_writerTask, 1);
 }
 
@@ -850,7 +850,7 @@ void GyroLogWriter::startSamplerTask()
     // sampler both run. The sampler's wait sleeps a tick while there's slack
     // (letting the main loop run) and tight-spins only in the final sub-tick
     // window for grid accuracy.
-    BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 8192,
+    BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
         this, 1, &_samplerTask, 1);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",

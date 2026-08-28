@@ -4265,7 +4265,9 @@ void loop() {
     if(hbLast == 0) hbLast = now;
     if(now - hbLast >= 5000)
     {
-      Serial.printf("[E2E-HB] loop alive, t=%lu ms, loops=%lu\n", (unsigned long)now, (unsigned long)hbCount);
+      Serial.printf("[E2E-HB] t=%lu ms loops=%lu freeHeap=%lu freePsram=%lu\n",
+        (unsigned long)now, (unsigned long)hbCount,
+        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
       hbLast = now;
     }
     hbCount++;
