@@ -39,7 +39,7 @@
 // [DIAG] 1 = the sampler does the I2C read but skips the ring write + semaphore
 // to test whether the ring/semaphore path is the leak source. 0 = normal.
 #ifndef GYRO_SKIP_RING_WRITE
-#define GYRO_SKIP_RING_WRITE 1
+#define GYRO_SKIP_RING_WRITE 0
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
