@@ -338,71 +338,9 @@ void BMDCameraConnection::sendBytesToOutgoing(std::vector<byte> data, bool respo
     bleChar_OutgoingCameraControl->writeValue(data.data(), data.size(), response);
 }
 
-// [DEBUG] Dump one incoming CCU packet: category, parameter, and the payload
-// rendered as text (so a clip filename like "A011_01011355_C001.braw" is
-// visible if the camera ever sends one). Always on for now; remove once the
-// slate/filename behaviour is understood.
-static void DumpIncomingCCUPacket(const uint8_t* pData, size_t length)
-{
-    if(length < 8)
-        return;
-
-    byte category  = pData[4]; // PacketFormatIndex::Category
-    byte parameter = pData[5]; // PacketFormatIndex::Parameter
-    size_t payloadLen = length - 8; // payload starts at offset 8
-
-    // Render the payload as text, escaping anything non-printable so a binary
-    // payload can't garble the console.
-    std::string text;
-    text.reserve(payloadLen);
-    for(size_t i = 0; i < payloadLen; i++)
-    {
-        char c = (char)pData[8 + i];
-        if(c >= 0x20 && c <= 0x7E)
-            text += c;
-        else
-            text += '.';
-    }
-
-    DEBUG_INFO("[BLE] len=%d cat=%d param=%d payload='%s'",
-        (int)length, (int)category, (int)parameter, text.c_str());
-
-    // [DEBUG] Also dump the full packet as hex so binary payloads (e.g. a
-    // slate-name reply) can be read exactly.
-    char hex[160];
-    int n = snprintf(hex, sizeof(hex), "[BLE-HEX] len=%d: ", (int)length);
-    for(size_t i = 0; i < length && n < (int)sizeof(hex) - 4; i++)
-        n += snprintf(hex + n, sizeof(hex) - n, "%02X ", pData[i]);
-    DEBUG_INFO("%s", hex);
-}
-
-// [DEBUG] Hex dump of a packet we are about to reject (e.g. >64 bytes), so we
-// can see what it actually contains.
-static void DumpRejectedPacketHex(const uint8_t* pData, size_t length)
-{
-    char line[128];
-    int n = snprintf(line, sizeof(line), "[BLE] REJECTED len=%d: ", (int)length);
-    for(size_t i = 0; i < length && n < (int)sizeof(line) - 4; i++)
-        n += snprintf(line + n, sizeof(line) - n, "%02X ", pData[i]);
-    DEBUG_INFO("%s", line);
-}
-
-// 1 = dump every incoming CCU packet (text + hex) for debugging. 0 = quiet.
-// Kept as a compile-time switch so the per-packet string building (which runs
-// in the BLE notify handler, right when the gyro log is sampling the IMU at
-// 1 kHz) can be switched off without touching the decode path.
-#ifndef GYROLOG_DEBUG
-    #define GYROLOG_DEBUG 0
-#endif
-
 // Incoming Control Notifications
 void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *pBLERemoteCharacteristic, uint8_t *pData, size_t length, bool isNotify)
 {
-    // [DEBUG] Dump every incoming packet. Only when GYROLOG_DEBUG is on.
-    #if GYROLOG_DEBUG
-        DumpIncomingCCUPacket(pData, length);
-    #endif
-
     // Must be between 8 and 64 bytes inclusive
     if(length >= 8 && length <= 64)
     {
@@ -414,10 +352,6 @@ void BMDCameraConnection::IncomingCameraControlNotify(BLERemoteCharacteristic *p
     }
     else
     {
-        // [DEBUG] Show the bytes of any packet we are about to drop.
-        #if GYROLOG_DEBUG
-            DumpRejectedPacketHex(pData, length);
-        #endif
         DEBUG_ERROR("Invalid incoming packet length.");
     }
 }

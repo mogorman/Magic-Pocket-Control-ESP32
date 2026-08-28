@@ -102,12 +102,13 @@ private:
 // The GCSV format is documented at:
 //   https://docs.gyroflow.xyz/app/technical-details/gcsv-format
 //
-// The IMU is sampled via the MPU6886's internal FIFO (drained in bursts), so
-// that a stall on the shared SPI bus (SD card write) never loses samples -- the
-// FIFO holds them until the I2C bus is free again. The sensor's true rate is
-// measured at start and declared in the GCSV "tscale" field so Gyroflow
-// resamples correctly. Data is quantised to fixed-point integers using the
-// gscale/ascale constants below, exactly as Gyroflow expects.
+// The IMU is sampled at 1 kHz: a dedicated task reads the MPU6886's output
+// registers once per 1 ms tick (pinned to the real-time grid) and appends one
+// dense row to a ring buffer; a second task commits the ring to the card in
+// batches, so a slow SD write never stalls the 1 kHz sampling. The "tscale"
+// field is 1 ms, so Gyroflow's timeline is dense and accurate. Data is
+// quantised to fixed-point integers using the gscale/ascale constants below,
+// exactly as Gyroflow expects.
 
 class GyroLogWriter
 {
@@ -193,22 +194,13 @@ public:
     // given clip duration.
     float measuredRateHz() const { return (_tscale > 0.0f) ? (1.0f / _tscale) : 0.0f; }
 
-    // Diagnostics from the last recording: how many FIFO-data I2C reads failed
-    // (a non-zero count at a high I2C clock means the clock is too fast for the
-    // sensor) and how many times the FIFO overflowed (we fell behind draining).
+    // Diagnostics from the last recording: how many I2C reads failed (a non-zero
+    // count at a high I2C clock means the clock is too fast for the sensor).
     uint32_t i2cFailures() const { return _i2cFailures; }
-    uint32_t fifoOverflows() const { return _fifoOverflows; }
 
-    // Set the I2C clock (Hz) used for the FIFO drain. The E2E test uses this to
-    // sweep a few clock values and find the reliability/throughput sweet spot.
-    // Takes effect on the next recording (drainFifoOnce reads _i2cHz each pass).
+    // Set the I2C clock (Hz) used for the IMU read. The E2E test uses this to
+    // sweep a few clock values and find the reliability sweet spot.
     void setI2cHz(uint32_t hz) { _i2cHz = hz; }
-
-    // Diagnostic: sweep DLPF_CFG x FCHOICE_B and log the measured FIFO rate for
-    // each combo, to find a config that yields ~1 kHz (drainable over I2C)
-    // instead of the clone's default ~3.8 kHz. Leaves the sensor in a clean
-    // (non-FIFO) state; call configureFifo() afterwards for a real recording.
-    void sweepFifoRate();
 
     const Summary& getSummary() const { return _summary; }
 
@@ -296,21 +288,13 @@ private:
     volatile bool _writerStop = false;        // tells the writer task to exit
     uint32_t _lastWriteMicros = 0;           // micros() of the writer's last card write (batch rate-limit)
 
-    // ---- Sampler task (drains the MPU6886 FIFO) ----
-    // The MPU6886's 1 KB FIFO only buffers ~25 ms of samples at its ~2.87 kHz
-    // rate. The main loop can't drain it that fast (it does UI/BLE work), so the
-    // FIFO overflowed and we lost ~86% of samples. The fix: a dedicated
-    // high-priority task that drains the FIFO every ~1-2 ms (well within the
-    // 25 ms window) and appends rows to the ring. The writer task (above) then
-    // commits the ring to the card. Pinned to core 1 (with the loop task) at a
-    // higher priority so it preempts the UI to drain the FIFO promptly; the I2C
-    // read and the SPI card write (core 0) stay on separate cores.
+    // ---- Sampler task (reads the IMU output registers at 1 kHz) ----
+    // A dedicated task reads the IMU once per 1 ms tick (pinned to the real-time
+    // 1 ms grid) and appends one dense GCSV row to the ring. It runs on core 0 at
+    // priority 5; the writer task (priority 6) preempts it briefly to flush the
+    // ring to the card, and the sampler re-locks to the grid afterwards.
     TaskHandle_t _samplerTask = nullptr;
     volatile bool _samplerStop = false;      // tells the sampler task to exit
-    // Bounded FIFO-drain guard: max I2C reads per poll() pass, so a stuck FIFO
-    // count can't spin the sampler. (The FIFO count normally decreases as we
-    // read, but a misbehaving clone could leave it high.)
-    static const int kMaxFifoReadsPerPass = 8;
 
     // Writer batch policy: only commit to the card once a decent chunk is
     // buffered (kMinWriteBytes) or a max interval has passed (kMaxWriteIntervalUs).
@@ -357,36 +341,18 @@ private:
     uint32_t _startMicros = 0; // micros() at the moment the log started
     uint32_t _lastDrainMicros = 0; // micros() of the last ring drain (rate-limits SD writes)
 
-    // ---- FIFO-based sampling (the fix for data loss on SD-write stalls) ----
-    // The MPU6886's internal FIFO buffers samples. Instead of reading the latest
-    // sample from the output registers every 1 ms (which loses the in-between
-    // samples whenever the shared SPI bus stalls the I2C read), poll() DRAINS the
-    // FIFO: every sample that accumulated while we were busy is read out, so
-    // nothing is lost. Each drained packet is one GCSV row.
-    //
-    // The "t" field is a running packet index (0, 1, 2, ...) -- NOT wall-clock ms
-    // -- because the sensor's true rate is not 1 kHz. The GCSV "tscale" field
-    // (measured at begin()) tells Gyroflow the real seconds-per-sample, so it
-    // resamples to the video rate correctly.
-    uint32_t _fifoSeq = 0;          // running packet index (the GCSV "t" value)
-    uint8_t _fifoBuf[1024];         // scratch for a FIFO read (up to the full 1 KB FIFO = 73 packets)
-    // Diagnostics: count of I2C read failures and FIFO overflows during the last
-    // recording. Exposed via i2cFailures()/fifoOverflows() for the E2E test to
-    // report (a non-zero I2C-failure count at a higher clock means the clock is
-    // too fast for the sensor).
+    // ---- 1 kHz output-register sampling ----
+    // The sampler task reads the MPU6886's output registers (0x3B+) once per 1 ms
+    // tick, pinned to the real-time 1 ms grid, and appends one dense GCSV row. The
+    // "t" field is a running sample index (0, 1, 2, ...) and "tscale" is 1 ms, so
+    // the timeline is dense and accurate by construction.
+    uint32_t _fifoSeq = 0;          // running sample index (the GCSV "t" value)
+    // Diagnostics: count of I2C read failures during the last recording. Exposed
+    // via i2cFailures() for the E2E test to report (a non-zero count at a higher
+    // clock means the clock is too fast for the sensor).
     volatile uint32_t _i2cFailures = 0;
-    volatile uint32_t _fifoOverflows = 0;
-    float _tscale = 0.001f;         // measured seconds-per-sample (written to the header)
-    bool _fifoConfigured = false;  // true once begin() set up the FIFO
-    // ---- Decimation to a clean, gap-free output rate (e.g. ~1 kHz) ----
-    // The sensor's FIFO runs at ~3.8 kHz, faster than the I2C bus can drain
-    // losslessly, so we DECIMATE: keep every Nth packet and write a dense
-    // t=0,1,2,... index at the decimated rate. N is chosen so the output is
-    // ~1 kHz (3.8k/4 = ~950 Hz). _decimatePacket is a running counter over ALL
-    // packets read (not just the ones we keep) so the sampling phase is stable
-    // and the output rate is exactly sourceRate/N.
-    static const uint32_t kDecimateN = 4; // keep 1 of every 4 packets -> ~950 Hz
-    uint32_t _decimatePacket = 0;          // running count of all packets read
+    float _tscale = 0.001f;         // seconds-per-sample (1 ms for the 1 kHz poll)
+    bool _fifoConfigured = false;  // true once begin() configured the sensor
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
@@ -394,18 +360,14 @@ private:
     // MPU6886 I2C address (7-bit). The M5 Core2's internal IMU sits at 0x68.
     static const uint8_t kImuAddr = 0x68;
 
-    // I2C clock (Hz) for draining the MPU6886 FIFO. 400 kHz is the datasheet
-    // "fast mode" limit, but the FIFO data read is the throughput bottleneck at
-    // the sensor's ~3.8 kHz rate (we need to move ~53 KB/s and 400 kHz I2C tops
-    // out at ~50 KB/s). 1 MHz ("fast mode plus") gives ~2.5x headroom. The
-    // M5Unified In_I2C bus is shared with other sensors, but they're only touched
-    // on the main loop (core 1) and the FIFO drain runs on the sampler task
-    // (core 0), so a faster clock here doesn't disturb them. The E2E clock sweep
-    // (400k-1.5M) showed 1.5 MHz gives the best capture with the fewest I2C read
-    // failures on this clone, so that's the default. (If a different board's
-    // sensor misbehaves at 1.5 MHz, drop this back to 1000000 or 400000.)
+    // I2C clock (Hz) for the 1 kHz output-register read. 1 MHz ("fast mode
+    // plus") gives the read ~0.4 ms of headroom under the 1 ms tick, and the E2E
+    // clock sweep (400k-1.5M) showed it gives the best capture with the fewest I2C
+    // read failures on this clone. The M5Unified In_I2C bus is shared with other
+    // sensors, but those are only touched on the main loop (core 1) and the
+    // sampler runs on core 0, so a faster clock here doesn't disturb them.
     static const uint32_t kImuI2cHz = 1000000;
-    // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
+    // The I2C clock actually used for the IMU read. Defaults to kImuI2cHz; the
     // E2E test can override it via setI2cHz() to sweep for the best value.
     uint32_t _i2cHz = kImuI2cHz;
 
@@ -424,12 +386,6 @@ private:
     // Runs on the writer task (and once from end() on the loop task to flush the
     // tail). Takes _ringMutex around the ring access.
     void drainRing();
-
-    // Configure the MPU6886's FIFO for sampling: set the clock source, ODR
-    // divider, DLPF, enable the FIFO for gyro+accel, and reset it. Then measure
-    // the sensor's true sample rate over a short window and store it in _tscale.
-    // Called from begin() before the first sample.
-    void configureFifo();
 
     // Configure the MPU6886 for OUTPUT-REGISTER polling (the 1 kHz sampling mode):
     // wake the sensor, set the clock source, and set the DLPF/SMPLRT_DIV so the
@@ -455,22 +411,17 @@ private:
     void startWriterTask();
     void stopWriterTask();
 
-    // The sampler task's main loop: continuously drain the MPU6886 FIFO into the
-    // ring (fast enough to never overflow the 1 KB FIFO), waking the writer as
-    // data arrives. On a stop request it does a final FIFO drain and exits.
-    // Runs on its own high-priority FreeRTOS task.
+    // The sampler task's main loop: read the IMU output registers once per 1 ms
+    // tick (pinned to the real-time grid) and append one dense row to the ring,
+    // waking the writer as data arrives. On a stop request it does a final read
+    // and exits. Runs on its own FreeRTOS task.
     static void samplerTaskTrampoline(void* param);
     void samplerTask();
 
     // Start / stop the sampler task. startSamplerTask() is called from begin();
-    // stopSamplerTask() from end() (signals stop, does a final drain, joins).
+    // stopSamplerTask() from end() (signals stop, does a final read, joins).
     void startSamplerTask();
     void stopSamplerTask();
-
-    // Drain the MPU6886 FIFO once, appending each packet to the ring. Shared by
-    // the sampler task's loop and its final drain. Bounded so a stuck FIFO count
-    // can't spin. Returns the number of packets drained this pass.
-    uint32_t drainFifoOnce();
 
     // Close the FatFile and commit it to the card. Safe to call when no file is open.
     void closeFile();
