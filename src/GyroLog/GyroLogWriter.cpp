@@ -34,7 +34,7 @@
 // [DIAG] 1 = the writer task just sleeps (no ring drain, no SD write) to test
 // whether the writer's work is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_WRITER_WORK
-#define GYRO_SKIP_WRITER_WORK 1
+#define GYRO_SKIP_WRITER_WORK 0
 #endif
 // [DIAG] 1 = the sampler does the I2C read but skips the ring write + semaphore
 // to test whether the ring/semaphore path is the leak source. 0 = normal.
