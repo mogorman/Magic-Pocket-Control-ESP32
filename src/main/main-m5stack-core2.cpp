@@ -4071,10 +4071,10 @@ void setup() {
   // connection so it doesn't interfere with the E2E test.
   // SMPLRT_DIV = 1 -> datasheet: 1kHz/(1+1) = 500 Hz on a spec chip. On this
   // clone the internal clock runs ~2.34x faster, so we expect ~1.17 kHz.
-  DEBUG_INFO("[GYRO-FIFO] running FIFO rate self-test (SMPLRT_DIV=1)...");
-  gyroLog.configureFifo(1); // SMPLRT_DIV = 1
+  DEBUG_INFO("[GYRO-FIFO] running FIFO rate self-test (SMPLRT_DIV=3)...");
+  gyroLog.configureFifo(3); // SMPLRT_DIV = 3
   float fifoRate = gyroLog.measureFifoRate();
-  DEBUG_INFO("[GYRO-FIFO] measured FIFO rate = %.1f Hz (target ~1.17 kHz)", fifoRate);
+  DEBUG_INFO("[GYRO-FIFO] measured FIFO rate = %.1f Hz", fifoRate);
 #endif
 
   tft.setColorDepth(16);
