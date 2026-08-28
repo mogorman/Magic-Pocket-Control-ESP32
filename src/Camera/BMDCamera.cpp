@@ -356,6 +356,13 @@ const std::vector<BMDCamera::MediaSlot> BMDCamera::getMediaSlots()
     return mediaSlots;
 }
 
+BMDCamera::MediaSlot BMDCamera::getMediaSlotSafe(int index)
+{
+    if(index >= 0 && index < (int)mediaSlots.size())
+        return mediaSlots[index];
+    return MediaSlot();
+}
+
 std::string BMDCamera::getSlotActiveStorageMediumString(int slotIndex)
 {
     if(mediaSlots.size() > slotIndex)

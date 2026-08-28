@@ -102,6 +102,11 @@ public:
     void onAutoFocusPressed(); // When auto focus button is pressed
 
     const std::vector<BMDCamera::MediaSlot> getMediaSlots();
+    // Returns the media slot at `index`, or a default-constructed (status = None)
+    // slot if the camera hasn't reported that many slots. Use this instead of
+    // indexing getMediaSlots() directly, which is out-of-bounds (and crashes)
+    // when the camera reports fewer slots than requested.
+    MediaSlot getMediaSlotSafe(int index);
     std::string getSlotActiveStorageMediumString(int slotIndex);
     std::string getSlotMediumStatusString(int slotIndex);
     bool hasActiveMediaSlot();

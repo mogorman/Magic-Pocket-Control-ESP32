@@ -3682,15 +3682,15 @@ void Screen_Media4K6K(bool forceRefresh = false)
     DEBUG_DEBUG("Media Pocket 4K/6K: Btn A/B pressed");
 
     // Make sure we have some media
-    bool hasMedia = camera->getMediaSlots()[0].status != CCUPacketTypes::MediaStatus::None || camera->getMediaSlots()[1].status != CCUPacketTypes::MediaStatus::None || camera->getMediaSlots()[2].status != CCUPacketTypes::MediaStatus::None;
+    bool hasMedia = camera->getMediaSlotSafe(0).status != CCUPacketTypes::MediaStatus::None || camera->getMediaSlotSafe(1).status != CCUPacketTypes::MediaStatus::None || camera->getMediaSlotSafe(2).status != CCUPacketTypes::MediaStatus::None;
 
     if(hasMedia)
     {
       TransportInfo transportInfo = camera->getTransportMode();
 
-      bool slotAvail1 = camera->getMediaSlots()[0].status != CCUPacketTypes::MediaStatus::None;
-      bool slotAvail2 = camera->getMediaSlots()[1].status != CCUPacketTypes::MediaStatus::None;
-      bool slotAvail3 = camera->getMediaSlots()[2].status != CCUPacketTypes::MediaStatus::None;
+      bool slotAvail1 = camera->getMediaSlotSafe(0).status != CCUPacketTypes::MediaStatus::None;
+      bool slotAvail2 = camera->getMediaSlotSafe(1).status != CCUPacketTypes::MediaStatus::None;
+      bool slotAvail3 = camera->getMediaSlotSafe(2).status != CCUPacketTypes::MediaStatus::None;
 
       // Make sure we have more than one available slot
       if(slotAvail1 + slotAvail2 + slotAvail3 > 1)
@@ -3772,7 +3772,7 @@ void Screen_Media4K6K(bool forceRefresh = false)
   sprite->drawString("MEDIA", 30, 9, &AgencyFB_Bold9pt7b);
 
   // CFAST
-  BMDCamera::MediaSlot cfast = camera->getMediaSlots()[0];
+  BMDCamera::MediaSlot cfast = camera->getMediaSlotSafe(0);
   sprite->fillSmoothRoundRect(20, 30, 295, 40, 3, (cfast.active ? TFT_DARKGREEN : TFT_DARKGREY));
   if(cfast.StatusIsError()) sprite->drawRoundRect(20, 30, 295, 40, 3, (cfast.active ? TFT_DARKGREEN : TFT_DARKGREY));
   sprite->drawString("CFAST", 28, 47);
@@ -3783,7 +3783,7 @@ void Screen_Media4K6K(bool forceRefresh = false)
   sprite->drawString(cfast.GetStatusString().c_str(), 28, 35, &Lato_Regular5pt7b);
 
   // SD
-  BMDCamera::MediaSlot sd = camera->getMediaSlots()[1];
+  BMDCamera::MediaSlot sd = camera->getMediaSlotSafe(1);
   sprite->fillSmoothRoundRect(20, 75, 295, 40, 3, (sd.active ? TFT_DARKGREEN : TFT_DARKGREY));
   if(sd.StatusIsError()) sprite->drawRoundRect(20, 75, 295, 40, 3, (sd.active ? TFT_DARKGREEN : TFT_DARKGREY));
   sprite->drawString("SD", 28, 92);
@@ -3795,7 +3795,7 @@ void Screen_Media4K6K(bool forceRefresh = false)
   if(sd.StatusIsError()) sprite->setTextColor(TFT_WHITE);
 
   // USB
-  BMDCamera::MediaSlot usb = camera->getMediaSlots()[2];
+  BMDCamera::MediaSlot usb = camera->getMediaSlotSafe(2);
   sprite->fillSmoothRoundRect(20, 120, 295, 40, 3, (usb.active ? TFT_DARKGREEN : TFT_DARKGREY));
   if(usb.StatusIsError()) sprite->drawRoundRect(20, 120, 295, 40, 3, (usb.active ? TFT_DARKGREEN : TFT_DARKGREY));
   sprite->drawString("USB", 28, 137);
