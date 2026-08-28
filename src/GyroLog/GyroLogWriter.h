@@ -10,7 +10,6 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <esp_heap_caps.h> // ps_malloc (PSRAM-backed ring buffer)
-#include <Wire.h> // TwoWire: native hardware I2C for the fast 1 kHz output-register read
 
 // A ring buffer backed by a PSRAM allocation, with the same interface the
 // writer uses from SdFat's RingBuf (begin/write/writeOut/bytesUsed). SdFat's
@@ -406,17 +405,6 @@ private:
     // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
     // E2E test can override it via setI2cHz() to sweep for the best value.
     uint32_t _i2cHz = kImuI2cHz;
-    // Native hardware I2C (TwoWire) on the Core2's internal bus (port 1, SDA=21,
-    // SCL=22) for the 1 kHz output-register read. The m5gfx driver (used by
-    // M5.In_I2C) does the read in multiple I2C transactions with ~0.4-0.6 ms of
-    // overhead and occasional multi-ms stalls; the native peripheral does the
-    // pointer-write + data-read in a SINGLE transaction (repeated start) with far
-    // less overhead, which is what lets us hold a clean 1 kHz. We own this bus
-    // exclusively during a recording (M5Unified's IMU polling is skipped then).
-    // Allocated in beginImuWire() (a pointer avoids the TwoWire "most vexing
-    // parse" for a non-default-constructed member).
-    TwoWire* _imuWire = nullptr;
-    bool _imuWireReady = false;
 
     // SD card status (for the on-screen diagnostic).
     bool _sdReady = false;
@@ -453,12 +441,6 @@ private:
     // ring. Returns the number of rows appended (0 or 1). Used by the sampler
     // task's 1 kHz poll loop.
     uint32_t pollOutputRegisters();
-
-    // Initialize the native hardware I2C bus (port 1) for the fast 1 kHz read, and
-    // later restore it to M5Unified's default so other code sees it unchanged.
-    // beginImuWire() is called from begin(); restoreImuWire() from end().
-    void beginImuWire();
-    void restoreImuWire();
 
     // The writer task's main loop: wait for pending rows (or a stop request),
     // then drain the ring to the file. Runs on its own FreeRTOS task.
