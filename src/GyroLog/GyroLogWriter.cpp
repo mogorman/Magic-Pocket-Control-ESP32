@@ -828,22 +828,23 @@ void GyroLogWriter::startSamplerTask()
     if(_samplerTask != nullptr)
         return; // already created (persistent task)
     // 4 KB stack: the task only does a small I2C read and a ring append, so
-    // this is ample. Pinned to CORE 0 at priority 5.
+    // this is ample. Pinned to CORE 1 at priority 5.
     //
-    // Why core 0 and not core 1: the main loop (UI/BLE/camera work) runs on
-    // core 1. The sampler's 1 ms spin-wait must hit the real-time grid
-    // precisely; on core 1 the busy main loop preempts that wait so often the
-    // sampler only lands on every other boundary (500 Hz). On core 0 the main
-    // loop isn't present, so the grid is clean. The writer task (priority 6,
-    // also core 0) preempts the sampler briefly to flush the ring, and the
-    // sampler re-locks to the grid afterwards.
+    // Why core 1 and not core 0: the BLE controller task (BTC_TASK) runs on
+    // core 0. During an active BLE recording it runs at a high priority and,
+    // together with a sampler on the same core, starves the core-0 idle task
+    // (IDLE0) -- the task watchdog (which needs the idle task to run) then
+    // aborts the CPU after ~35 s. Putting the sampler on core 1 (with the main
+    // loop) keeps core 0 free for the BLE stack and its idle task. The sampler's
+    // wait sleeps a tick while there's slack (so it coexists with the main loop)
+    // and tight-spins only in the final sub-tick window for grid accuracy.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 0);
+        this, 5, &_samplerTask, 1);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 0, prio 5, persistent)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5, persistent)");
 }
 
 void GyroLogWriter::stopSamplerTask()
