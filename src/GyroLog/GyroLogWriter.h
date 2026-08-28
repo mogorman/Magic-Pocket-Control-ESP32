@@ -9,24 +9,35 @@
 
 // SD-backed gyro log writer.
 //
-// This is the DATA side only: it mounts the Core2's microSD card via SdFat
-// and, for each recorded clip, writes a small text file next to where the
-// GCSV data will eventually go. The 1 kHz IMU sampling / GCSV sample writing
-// is NOT implemented yet (that is a later step); for now the file just proves
-// the SD write path works end to end:
+// This is the DATA side: it mounts the Core2's microSD card via SdFat and, for
+// each recorded clip, writes a sidecar data file next to where the GCSV data
+// will eventually go.
 //
-//   * begin(clipName, ...)  -> on record start: create "/<clipName>.txt" and
-//                              write "hello world" plus the clip name.
-//   * end()                 -> on record stop:  close the file and force the
+//   * begin(clipName, ...)  -> on record start: create the data file and write
+//                              its header.
+//   * poll()               -> on each main-loop tick while recording: append one
+//                              sample's worth of data at the real 1 kHz rate.
+//   * end()                -> on record stop:  close the file and force the
 //                              FAT directory entry to the card.
-//   * applySlateName(name)  -> after the real clip name is learned from the
+//   * applySlateName(name) -> after the real clip name is learned from the
 //                              camera (via playback), rename the file to
-//                              "/<realName>.txt" and rewrite its contents to
+//                              "/<realName>.<ext>" and rewrite its contents to
 //                              match the real name.
+//
+// DATA MOCK (GYRO_MOCK_DATA, default 1): the real IMU sampling is not ported
+// yet, so poll() writes a *mock* GCSV row at the same rate and (approximately)
+// the same byte size the real 1 kHz sampler will produce, so we can validate the
+// SD write path under realistic load: does the card sustain the write rate, and
+// does the finished file have exactly the expected size and a complete,
+// well-formed body? With GYRO_MOCK_DATA=0 the data side is a no-op (the file
+// just holds a "hello world" payload) for the earlier bring-up tests.
 //
 // The SD card shares the VSPI bus with the M5GFX display, so SdFat is told
 // not to re-initialise the bus (USER_SPI_BEGIN) and only toggles the SD's CS
 // pin (GPIO4). See ensureSd().
+#ifndef GYRO_MOCK_DATA
+#define GYRO_MOCK_DATA 1
+#endif
 class GyroLogWriter
 {
 public:
@@ -47,6 +58,11 @@ public:
         uint64_t fileSizeBytes = 0;
         uint64_t freeBytes = 0;
         uint64_t totalBytes = 0;
+        // Mock-data bookkeeping (only meaningful when GYRO_MOCK_DATA is on): the
+        // number of data rows written and the header byte count, so the expected
+        // file size (header + rows * kMockRowBytes) can be checked exactly.
+        uint32_t mockRows = 0;
+        uint32_t mockHeaderBytes = 0;
     };
 
     // Begin a new log: mount the SD card and create "/<clipName>.txt" with a
@@ -57,7 +73,9 @@ public:
     //   lensInfo  : the lens the camera reports; may be empty
     bool begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo = "");
 
-    // Poll the IMU. No-op for now (no sampling yet).
+    // Poll the IMU. With GYRO_MOCK_DATA this appends one mock GCSV row per
+    // ~1 ms tick (the real 1 kHz rate) to the open data file. With
+    // GYRO_MOCK_DATA=0 it is a no-op.
     void poll();
 
     // Finalise the current log: close the file and commit the directory entry
@@ -94,6 +112,14 @@ public:
     // Returns the size in bytes of the file at `path`, or 0 if it can't be
     // opened.
     uint64_t fileSize(const std::string& path) const;
+    // Re-open the file at `path` read-only and verify its body is complete and
+    // well-formed: it must contain exactly `expectedRows` data rows (each a
+    // "t,gx,gy,gz,ax,ay,az" line), the final row's "t" index must equal
+    // expectedRows-1 (i.e. no rows were dropped), and the file must end with a
+    // newline. Returns true only if all of that holds. Used by the E2E test to
+    // confirm the file was written completely, not just that it has the right
+    // size.
+    bool verifyFileComplete(const std::string& path, uint32_t expectedRows) const;
 
     // ---- Orientation (calibration) ----
     int getOrientationIndex() const { return _orientationIndex; }
@@ -116,6 +142,11 @@ private:
     void syncVolume();
     // Write the "hello world" payload for a given clip name to a file at `path`.
     bool writeHelloWorld(const std::string& path, const std::string& clipName);
+#if GYRO_MOCK_DATA
+    // Write the GCSV header (the "GYROFLOW IMU LOG" block) to the open data
+    // file. Returns the number of bytes written (0 on failure).
+    int writeGcsvHeader(const std::string& timecode, const std::string& videoFileName);
+#endif
 
     State _state = State::Idle;
     Summary _summary;
@@ -132,6 +163,18 @@ private:
     uint64_t _finalFileSize = 0;
 
     int _orientationIndex = 0;
+
+#if GYRO_MOCK_DATA
+    // Mock-data state. The file is a real GCSV: a fixed header followed by one
+    // row per 1 ms tick. The mock row is a fixed-width string so the finished
+    // file size is exactly predictable (header + rows * kMockRowBytes).
+    // Row format: "000000,0,0,0,0,0,0\n" = 19 bytes.
+    static const size_t kMockRowBytes = 19;
+    uint32_t _mockSeq = 0;          // the "t" index for the next row (0,1,2,...)
+    uint32_t _mockLastTick = 0;    // millis() of the last row written
+    uint32_t _mockRowsWritten = 0; // total rows written this clip (for the summary)
+    uint32_t _mockHeaderBytes = 0; // byte count of the GCSV header written in begin()
+#endif
 };
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).

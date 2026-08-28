@@ -100,7 +100,6 @@ bool GyroLogWriter::writeHelloWorld(const std::string& path, const std::string& 
 
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
 {
-    (void)timecode;
     (void)lensInfo;
 
     if(_state == State::Recording)
@@ -117,14 +116,41 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     _extension = extension;
     _gcsvPath = "/" + clipName + ".txt";
 
-    // Create the file with the "hello world" payload.
+#if GYRO_MOCK_DATA
+    // Open the data file and write the GCSV header. The mock sampler (poll())
+    // then appends one fixed-width row per 1 ms tick, so the finished file size
+    // is exactly predictable: header + rows * kMockRowBytes.
+    _file.close();
+    if(!_file.open(_gcsvPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC))
+    {
+        DEBUG_INFO("[GYRO] begin(): open FAILED for '%s' (err=%d)", _gcsvPath.c_str(), (int)_file.getError());
+        return false;
+    }
+
+    int headerBytes = writeGcsvHeader(timecode, _startedName + "." + _extension);
+    if(headerBytes < 0)
+    {
+        DEBUG_INFO("[GYRO] begin(): failed to write header to '%s'", _gcsvPath.c_str());
+        _file.close();
+        return false;
+    }
+
+    _mockSeq = 0;
+    _mockLastTick = millis();
+    _mockRowsWritten = 0;
+    _mockHeaderBytes = (uint32_t)headerBytes;
+
+    DEBUG_INFO("[GYRO] begin(): opened '%s', wrote %d-byte header (clip='%s')",
+        _gcsvPath.c_str(), headerBytes, clipName.c_str());
+#else
+    // No mock data: just create the file with the "hello world" payload.
     if(!writeHelloWorld(_gcsvPath, clipName))
     {
         DEBUG_INFO("[GYRO] begin(): failed to create '%s'", _gcsvPath.c_str());
         return false;
     }
-
     DEBUG_INFO("[GYRO] begin(): wrote '%s' (clip='%s')", _gcsvPath.c_str(), clipName.c_str());
+#endif
 
     _state = State::Recording;
     return true;
@@ -132,7 +158,49 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
 
 void GyroLogWriter::poll()
 {
-    // No sampling yet (data side only for now).
+#if GYRO_MOCK_DATA
+    if(_state != State::Recording)
+        return;
+    if(!_file.isOpen())
+        return;
+
+    // Write one row per ~1 ms tick. We gate on the millisecond changing so the
+    // row rate tracks the real 1 kHz sampler even though the main loop runs at an
+    // irregular cadence (it also does UI work). A tick that the loop skips is
+    // simply a gap in the "t" index -- the same as a dropped real sample.
+    uint32_t now = millis();
+    if(now == _mockLastTick)
+        return; // not a new millisecond yet
+    _mockLastTick = now;
+
+    // Fixed-width mock row: "t,gx,gy,gz,ax,ay,az\n". The "t" index is
+    // zero-padded to a fixed width so every row is exactly kMockRowBytes, which
+    // makes the finished file size exactly predictable. Values are a simple
+    // pattern (seq) so a reader can confirm the sequence is intact.
+    char row[48];
+    int n = snprintf(row, sizeof(row), "%06lu,0,0,0,0,0,0\n", (unsigned long)_mockSeq);
+    if(n < 0)
+        n = 0;
+    if(n != (int)kMockRowBytes)
+    {
+        // The row width is a build-time invariant; if it ever changes, log once
+        // so the size prediction is not silently wrong.
+        DEBUG_ERROR("[GYRO] poll(): mock row width %d != expected %d", n, (int)kMockRowBytes);
+    }
+
+    if(_file.write((const uint8_t*)row, (size_t)n) != n)
+    {
+        DEBUG_INFO("[GYRO] poll(): SD write FAILED at row %lu (err=%d)",
+            (unsigned long)_mockSeq, (int)_file.getError());
+        return;
+    }
+
+    _mockSeq++;
+    _mockRowsWritten++;
+#else
+    // No mock data (data side not ported yet).
+    (void)0;
+#endif
 }
 
 bool GyroLogWriter::end()
@@ -142,8 +210,8 @@ bool GyroLogWriter::end()
 
     _state = State::Idle;
 
-    // The file was fully written in begin(); close it (flushes any buffer) and
-    // commit the directory entry to the card so it's visible on a computer.
+    // Close the file (flushes any buffer) and commit the directory entry to the
+    // card so it's visible on a computer.
     if(_file.isOpen())
     {
         _finalFileSize = _file.fileSize();
@@ -156,6 +224,10 @@ bool GyroLogWriter::end()
     _summary.fileName = _startedName + ".txt";
     _summary.videoFileName = _startedName + "." + _extension;
     _summary.fileSizeBytes = _finalFileSize;
+#if GYRO_MOCK_DATA
+    _summary.mockRows = _mockRowsWritten;
+    _summary.mockHeaderBytes = _mockHeaderBytes;
+#endif
     // Total space comes from the boot sector (cluster count x
     // bytes-per-cluster) -- cheap, so do it here. Free space is NOT computed
     // here: freeClusterCount() walks the whole FAT (tens of seconds on a large
@@ -168,7 +240,13 @@ bool GyroLogWriter::end()
         _summary.freeBytes = 0;
     }
 
+#if GYRO_MOCK_DATA
+    DEBUG_INFO("[GYRO] end(): closed '%s', size=%lu bytes, %lu mock rows, %lu-byte header",
+        _gcsvPath.c_str(), (unsigned long)_finalFileSize,
+        (unsigned long)_mockRowsWritten, (unsigned long)_mockHeaderBytes);
+#else
     DEBUG_INFO("[GYRO] end(): closed '%s', size=%lu bytes", _gcsvPath.c_str(), (unsigned long)_finalFileSize);
+#endif
     return true;
 }
 
@@ -219,9 +297,14 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
         }
     }
 
-    // Rewrite the file contents to match the real clip name.
+    // In mock mode the file holds real GCSV data (header + rows); we must NOT
+    // clobber it with the "hello world" payload, so we only rename it. In
+    // non-mock mode the file is the hello-world stub, which we rewrite so its
+    // contents match the real clip name.
+#if !GYRO_MOCK_DATA
     if(writeHelloWorld(_gcsvPath, slateName))
         syncVolume();
+#endif
 
     // Reflect the new name in the summary shown on the Gyro Log screen.
     _summary.fileName = slateName + ".txt";
@@ -260,3 +343,126 @@ uint64_t GyroLogWriter::fileSize(const std::string& path) const
     f.close();
     return size;
 }
+
+#if GYRO_MOCK_DATA
+// Write the GCSV header block to the already-open data file. The header is a
+// fixed set of "key,value" lines (the GYROFLOW IMU LOG format). The "note" and
+// "videofilename" fields embed the clip name, so the header length depends on
+// the name length -- but that is fine: the E2E test reads the actual file size
+// after the fact rather than predicting it, and the data rows (the part that
+// must be exactly predictable) are fixed-width. Returns the number of bytes
+// written, or -1 on failure.
+int GyroLogWriter::writeGcsvHeader(const std::string& timecode, const std::string& videoFileName)
+{
+    char header[512];
+    int n = snprintf(header, sizeof(header),
+        "GYROFLOW IMU LOG\n"
+        "version,1.3\n"
+        "id,m5stack-core2-mpu6886\n"
+        "orientation,%s\n"
+        "note,M5Stack Core2 gyro log ~1kHz (mock); start TC %s\n"
+        "fwversion,1.0.0\n"
+        "timestamp,0\n"
+        "vendor,m5stack\n"
+        "videofilename,%s\n"
+        "tscale,%.6f\n"
+        "gscale,%.11f\n"
+        "ascale,%.11f\n"
+        "t,gx,gy,gz,ax,ay,az\n",
+        GyroLogWriter::orientationToken(_orientationIndex),
+        timecode.c_str(),
+        videoFileName.c_str(),
+        0.001, // tscale: 1 ms per sample (1 kHz)
+        0.000172685, // gscale (deg/s -> rad/s, +/-2000 deg/s)
+        0.000244141); // ascale (g -> m/s^2, +/-8 g)
+
+    if(n < 0)
+        return -1;
+    if(_file.write((const uint8_t*)header, (size_t)n) != n)
+        return -1;
+    return n;
+}
+
+// Re-open the file read-only and confirm the body is complete and well-formed:
+// exactly `expectedRows` data rows, the last row's "t" index == expectedRows-1
+// (no dropped rows), and the file ends with a newline. This is the "written
+// completely" check the E2E test needs on top of the size check.
+bool GyroLogWriter::verifyFileComplete(const std::string& path, uint32_t expectedRows) const
+{
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+        return false;
+
+    // Read the whole file (a few hundred KB at most for a short clip) and scan
+    // it. We count data rows (lines that are not the header block) and track
+    // the last "t" index we saw.
+    uint32_t rows = 0;
+    uint32_t lastT = 0;
+    bool sawHeader = false;
+    bool endsWithNewline = false;
+    char line[64];
+
+    // First, note whether the file ends with a newline.
+    uint64_t size = f.fileSize();
+    if(size > 0)
+    {
+        f.seekSet(size - 1);
+        char last = 0;
+        if(f.read(&last, 1) == 1)
+            endsWithNewline = (last == '\n');
+    }
+    f.seekSet(0);
+
+    // Line-by-line scan. We read char-by-char into a small buffer; for a
+    // short test clip this is fine and avoids pulling in a line-reading helper.
+    int c;
+    size_t li = 0;
+    while((c = f.read()) != -1)
+    {
+        if(c == '\n')
+        {
+            line[li] = 0;
+            if(li > 0)
+            {
+                // A data row looks like "NNNNNN,...". The header lines are
+                // "key,value" and the column header "t,gx,..." -- none of those
+                // start with a 6-digit number, so we can tell them apart by the
+                // first field.
+                if(line[0] >= '0' && line[0] <= '9' && li >= 6)
+                {
+                    // Parse the "t" index (first field, before the first comma).
+                    uint32_t t = 0;
+                    size_t k = 0;
+                    while(k < li && line[k] != ',')
+                    {
+                        t = t * 10 + (uint32_t)(line[k] - '0');
+                        k++;
+                    }
+                    if(k < li) // had a comma -> it's a data row
+                    {
+                        rows++;
+                        lastT = t;
+                    }
+                }
+                else if(strncmp(line, "GYROFLOW IMU LOG", 16) == 0)
+                {
+                    sawHeader = true;
+                }
+            }
+            li = 0;
+        }
+        else if(li < sizeof(line) - 1)
+        {
+            line[li++] = (char)c;
+        }
+    }
+
+    f.close();
+
+    bool ok = sawHeader && (rows == expectedRows) && (lastT == expectedRows - 1) && endsWithNewline;
+    DEBUG_INFO("[GYRO] verifyFileComplete('%s'): rows=%lu expected=%lu lastT=%lu expectedLastT=%lu endsNL=%d -> %s",
+        path.c_str(), (unsigned long)rows, (unsigned long)expectedRows,
+        (unsigned long)lastT, (unsigned long)(expectedRows - 1), (int)endsWithNewline, ok ? "OK" : "MISMATCH");
+    return ok;
+}
+#endif // GYRO_MOCK_DATA

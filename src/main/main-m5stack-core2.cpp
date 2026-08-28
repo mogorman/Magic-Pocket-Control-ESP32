@@ -4231,13 +4231,22 @@ static void gyroE2ETestTick()
     case 3:
     {
       // Verify the file (renamed to the real clip name, or the original name if
-      // no clip name arrived) exists and is the expected size.
+      // no clip name arrived) exists, has the expected size, and is complete.
       char path[128];
       snprintf(path, sizeof(path), "/%s.txt", e2eRealName.c_str());
 
-      // The expected size is the exact byte count written for the REAL name
-      // (writeHelloWorld rewrites the file with the real clip name on rename).
-      size_t expectedSize = snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eRealName.c_str());
+      const GyroLogWriter::Summary& s = gyroLog.getSummary();
+
+      // Expected size = header + (rows * 19). In mock mode the row width is a
+      // fixed 19 bytes, so this is exact. (In non-mock mode the file is the
+      // "hello world" payload, so we fall back to the old size check.)
+#if GYRO_MOCK_DATA
+      uint64_t expectedSize = (uint64_t)s.mockHeaderBytes + (uint64_t)s.mockRows * 19;
+      DEBUG_INFO("[GYRO-E2E] expected size: %lu-byte header + %lu rows * 19 = %lu bytes",
+        (unsigned long)s.mockHeaderBytes, (unsigned long)s.mockRows, (unsigned long)expectedSize);
+#else
+      uint64_t expectedSize = (uint64_t)snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eRealName.c_str());
+#endif
 
       if(!gyroLog.fileExists(path))
       {
@@ -4246,11 +4255,22 @@ static void gyroE2ETestTick()
       else
       {
         uint64_t actual = gyroLog.fileSize(path);
-        bool ok = (actual == expectedSize);
+        bool sizeOk = (actual == expectedSize);
         DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes (expected %lu) -> %s",
-          path, (unsigned long)actual, (unsigned long)expectedSize, ok ? "PASS" : "FAIL");
-        if(!ok)
+          path, (unsigned long)actual, (unsigned long)expectedSize, sizeOk ? "PASS" : "FAIL");
+        if(!sizeOk)
           DEBUG_ERROR("[GYRO-E2E] FAIL: size %lu != expected %lu", (unsigned long)actual, (unsigned long)expectedSize);
+
+#if GYRO_MOCK_DATA
+        // Also confirm the file was written *completely*: re-read it and check
+        // the row count and that the last "t" index is rows-1 (no dropped rows).
+        bool complete = gyroLog.verifyFileComplete(path, s.mockRows);
+        if(!complete)
+          DEBUG_ERROR("[GYRO-E2E] FAIL: file body is not complete/well-formed");
+        else
+          DEBUG_INFO("[GYRO-E2E] file body complete (all %lu rows present, ends with newline)",
+            (unsigned long)s.mockRows);
+#endif
       }
       e2eState = 4;
       break;
@@ -4289,6 +4309,12 @@ void loop() {
     else
       DEBUG_INFO("[GYRO] failed to start log '%s' (SD not ready?)", gyroPendingStart.clipName.c_str());
   }
+
+  // While recording, append one sample's worth of data per ~1 ms tick. (With
+  // GYRO_MOCK_DATA this is the mock GCSV row writer; later it becomes the real
+  // 1 kHz IMU sampler.) Called every loop() iteration so the row rate tracks the
+  // real sampler even though the loop cadence is irregular.
+  gyroLog.poll();
 
   // Finalise a just-stopped log (close file + commit to card).
   if(gyroPendingEnd)
