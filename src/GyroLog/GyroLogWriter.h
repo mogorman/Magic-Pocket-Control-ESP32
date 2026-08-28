@@ -80,6 +80,13 @@ public:
     bool sdReady() const { return _sdReady; }
     const std::string& sdStatusMessage() const { return _sdStatusMessage; }
 
+    // Refresh the free/total space figures in the summary. This calls
+    // freeClusterCount(), which on a FAT32 card walks the whole FAT (tens of
+    // seconds), so it is deliberately NOT done in end() (that would stall the
+    // stop path). Call it from a non-critical context (e.g. the Gyro Log
+    // screen refresh) instead.
+    void refreshFreeSpace();
+
     // Filesystem helpers (used by the E2E test to verify a written file).
     // Returns true if a file exists at `path` (e.g. "/clip_0001.txt").
     bool fileExists(const std::string& path) const;

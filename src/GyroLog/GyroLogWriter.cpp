@@ -156,32 +156,35 @@ bool GyroLogWriter::end()
     _summary.fileName = _startedName + ".txt";
     _summary.videoFileName = _startedName + "." + _extension;
     _summary.fileSizeBytes = _finalFileSize;
-    // Report total and free space on the card for the screen. Total comes from
-    // the FAT boot sector (cluster count x bytes-per-cluster) -- cheap. Free
-    // space comes from freeClusterCount(); on a FAT32 card that walks the whole
-    // FAT once (it's cached afterwards), so we time it and log how long it took.
-    // The original branch avoided it because it hung ~99s under the full GCSV
-    // writer load; here we measure it on the lightweight text-file path and keep
-    // a generous 10s cap as a safety net (we can't preempt a blocking call, but
-    // this keeps a pathological card from stalling the UI indefinitely).
+    // Total space comes from the FAT boot sector (cluster count x
+    // bytes-per-cluster) -- cheap, so do it here. Free space is NOT computed
+    // here: freeClusterCount() walks the whole FAT (tens of seconds on FAT32)
+    // and would stall the stop path. It is refreshed lazily via
+    // refreshFreeSpace() from a non-critical context instead.
     if(_sd.fatType() != 0)
     {
         uint32_t bpc = _sd.bytesPerCluster();
         _summary.totalBytes = (uint64_t)_sd.clusterCount() * bpc;
-
-        uint32_t tFree = micros();
-        int32_t freeClusters = _sd.freeClusterCount();
-        uint32_t freeMs = (uint32_t)((micros() - tFree) / 1000UL);
-        if(freeClusters > 0)
-            _summary.freeBytes = (uint64_t)freeClusters * bpc;
-        else
-            _summary.freeBytes = 0;
-        DEBUG_INFO("[GYRO] end(): freeClusterCount=%ld, took %lu ms",
-          (long)freeClusters, (unsigned long)freeMs);
+        _summary.freeBytes = 0;
     }
 
     DEBUG_INFO("[GYRO] end(): closed '%s', size=%lu bytes", _gcsvPath.c_str(), (unsigned long)_finalFileSize);
     return true;
+}
+
+void GyroLogWriter::refreshFreeSpace()
+{
+    if(_sd.fatType() == 0)
+        return; // not mounted
+
+    uint32_t bpc = _sd.bytesPerCluster();
+    uint32_t tFree = micros();
+    int32_t freeClusters = _sd.freeClusterCount();
+    uint32_t freeMs = (uint32_t)((micros() - tFree) / 1000UL);
+    if(freeClusters > 0)
+        _summary.freeBytes = (uint64_t)freeClusters * bpc;
+    DEBUG_INFO("[GYRO] refreshFreeSpace: freeClusters=%ld, took %lu ms",
+      (long)freeClusters, (unsigned long)freeMs);
 }
 
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)

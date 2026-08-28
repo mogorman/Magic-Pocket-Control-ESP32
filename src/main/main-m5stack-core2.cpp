@@ -840,6 +840,12 @@ void Screen_GyroLog(bool forceRefresh = false)
   if(gyroLog.getSummary().valid)
   {
     // Summary mode: show the details of the last clip written.
+    // Refresh the (lazy) free-space figure here, off the record stop path.
+    // freeClusterCount() is cached after the first call, so this only does the
+    // (slow) FAT walk once; on later refreshes it's a cheap cached read.
+    if(gyroLog.getSummary().freeBytes == 0)
+      gyroLog.refreshFreeSpace();
+
     const GyroLogWriter::Summary& s = gyroLog.getSummary();
 
     sprite->setTextColor(TFT_LIGHTGREY);
