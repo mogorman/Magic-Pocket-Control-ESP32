@@ -4131,11 +4131,11 @@ void setup() {
 // task committing to the card, end() flush) and verifies the recorded sample
 // count is correct for the clip duration.
 #ifndef GYRO_E2E_TEST
-#define GYRO_E2E_TEST 0
+#define GYRO_E2E_TEST 1
 #endif
 // How long (seconds) the E2E test records before stopping.
 #ifndef GYRO_E2E_DURATION_S
-#define GYRO_E2E_DURATION_S 20
+#define GYRO_E2E_DURATION_S 60
 #endif
 // How long (ms) to wait after boot before the E2E test triggers the record
 // start, so the UI/camera-connection code has a moment to settle.
