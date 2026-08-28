@@ -156,11 +156,11 @@ bool GyroLogWriter::end()
     _summary.fileName = _startedName + ".txt";
     _summary.videoFileName = _startedName + "." + _extension;
     _summary.fileSizeBytes = _finalFileSize;
-    // Total space comes from the FAT boot sector (cluster count x
+    // Total space comes from the boot sector (cluster count x
     // bytes-per-cluster) -- cheap, so do it here. Free space is NOT computed
-    // here: freeClusterCount() walks the whole FAT (tens of seconds on FAT32)
-    // and would stall the stop path. It is refreshed lazily via
-    // refreshFreeSpace() from a non-critical context instead.
+    // here: freeClusterCount() walks the whole FAT (tens of seconds on a large
+    // exFAT/FAT32 card) and would stall the stop path. It is refreshed lazily
+    // via refreshFreeSpace() from a non-critical context instead.
     if(_sd.fatType() != 0)
     {
         uint32_t bpc = _sd.bytesPerCluster();
