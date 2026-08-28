@@ -46,6 +46,7 @@ static LGFX_Sprite *sprite;
 #include "Camera/BMDCameraConnection.h"
 #include "Camera/BMDCamera.h"
 #include "BMDControlSystem.h"
+#include "GyroLog/GyroLogWriter.h"
 
 // Include the watchdog library so we can stop it timing out while pass key entry.
 #include "esp_task_wdt.h"
@@ -177,6 +178,10 @@ static bool gyroInPlayback = false;
 // during playback, queued for the main loop to display.
 static std::string gyroPendingSlateName;
 static bool gyroPendingSlateNameValid = false;
+
+// Gyro log (GCSV) writer for the Core2's MPU6886. (Currently a stub; the full
+// 1 kHz sampling + SD writing is ported in a later step.)
+GyroLogWriter gyroLog;
 
 // Display elements on the screen common to all pages
 void Screen_Common(int sideBarColour)
