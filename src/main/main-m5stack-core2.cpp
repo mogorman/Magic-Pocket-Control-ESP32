@@ -4140,7 +4140,7 @@ void setup() {
 // How long (ms) to wait after boot before the E2E test triggers the record
 // start, so the UI/camera-connection code has a moment to settle.
 #ifndef GYRO_E2E_SETTLE_MS
-#define GYRO_E2E_SETTLE_MS 3000
+#define GYRO_E2E_SETTLE_MS 999999
 #endif
 
 #if GYRO_E2E_TEST
@@ -4251,13 +4251,9 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 void loop() {
 
-#if GYRO_E2E_TEST
-  // End-to-end test: drive a mock record start/stop through the same pending
-  // flags the real record button uses. Runs before the pending-flag handling
-  // below so a start queued this iteration is processed in the same pass.
-  gyroE2ETestTick();
-  // [DIAG] Heartbeat: prove the main loop keeps iterating during the recording
-  // (a hung loop would stop these). Prints every 5 s.
+  // [DIAG] Always-on heartbeat: report the free heap every 5 s so we can see if
+  // the internal RAM leaks over time, and whether the leak is tied to a recording
+  // being active. (Remove for a clean production build.)
   {
     static uint32_t hbLast = 0;
     static uint32_t hbCount = 0;
@@ -4265,13 +4261,20 @@ void loop() {
     if(hbLast == 0) hbLast = now;
     if(now - hbLast >= 5000)
     {
-      Serial.printf("[E2E-HB] t=%lu ms loops=%lu freeHeap=%lu freePsram=%lu\n",
+      Serial.printf("[HB] t=%lu ms loops=%lu freeHeap=%lu freePsram=%lu rec=%d\n",
         (unsigned long)now, (unsigned long)hbCount,
-        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
+        (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram(),
+        (int)gyroLog.isRecording());
       hbLast = now;
     }
     hbCount++;
   }
+
+#if GYRO_E2E_TEST
+  // End-to-end test: drive a mock record start/stop through the same pending
+  // flags the real record button uses. Runs before the pending-flag handling
+  // below so a start queued this iteration is processed in the same pass.
+  gyroE2ETestTick();
 #endif
 
   // Start a queued GCSV log here, on the main loop thread. The record-start
