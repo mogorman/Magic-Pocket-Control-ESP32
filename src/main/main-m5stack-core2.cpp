@@ -32,7 +32,7 @@
 // boot (enables the gyro+accel FIFO, drains it for ~3 s, and logs the measured
 // packets/second). Default 0 = compiled out.
 #ifndef GYRO_FIFO_TEST
-#define GYRO_FIFO_TEST 0
+#define GYRO_FIFO_TEST 1
 #endif
 
 // The output format is: >>[state]:[state value]

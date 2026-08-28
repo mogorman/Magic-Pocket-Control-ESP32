@@ -1,6 +1,7 @@
 #include "GyroLogWriter.h"
 #include <SPI.h>
 #include <cstring> // strcmp
+#include <M5Unified.h> // M5.In_I2C (MPU6886 FIFO self-test)
 
 const char* const GYROLOG_ORIENTATION_TOKENS[GyroLogWriter::kOrientationCount] =
 {
@@ -372,6 +373,31 @@ bool GyroLogWriter::configureFifo(int smplrtDiv)
     M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x40, kImuI2cHz);
     delay(10);
 
+    // Read back the key registers to confirm the FIFO is really enabled.
+    uint8_t who = M5.In_I2C.readRegister8(kImuAddr, 0x75, kImuI2cHz);
+    uint8_t pwr = M5.In_I2C.readRegister8(kImuAddr, 0x6B, kImuI2cHz);
+    uint8_t smpl = M5.In_I2C.readRegister8(kImuAddr, 0x19, kImuI2cHz);
+    uint8_t cfg = M5.In_I2C.readRegister8(kImuAddr, 0x1A, kImuI2cHz);
+    uint8_t fifoEn = M5.In_I2C.readRegister8(kImuAddr, 0x23, kImuI2cHz);
+    uint8_t user = M5.In_I2C.readRegister8(kImuAddr, 0x6A, kImuI2cHz);
+    uint8_t cntHi = M5.In_I2C.readRegister8(kImuAddr, 0x72, kImuI2cHz);
+    uint8_t cntLo = M5.In_I2C.readRegister8(kImuAddr, 0x73, kImuI2cHz);
+    DEBUG_INFO("[GYRO] configureFifo readback: WHO_AM_I=0x%02X PWR=0x%02X SMPL=0x%02X CFG=0x%02X FIFO_EN=0x%02X USER=0x%02X FIFO_COUNT=%u",
+        who, pwr, smpl, cfg, fifoEn, user, (cntHi << 8) | cntLo);
+
+    // Also read raw output-register samples to confirm the sensor is producing
+    // changing data (independent of the FIFO). Read gyro (0x43) five times,
+    // 100 ms apart, to see if the values move at all.
+    uint8_t rawG[6];
+    for(int i = 1; i <= 5; i++)
+    {
+        M5.In_I2C.readRegister(kImuAddr, 0x43, rawG, 6, kImuI2cHz);
+        DEBUG_INFO("[GYRO] gyro sample #%d: gx=%d gy=%d gz=%d",
+            i,
+            (int16_t)((rawG[0] << 8) | rawG[1]), (int16_t)((rawG[2] << 8) | rawG[3]), (int16_t)((rawG[4] << 8) | rawG[5]));
+        if(i < 5)
+            delay(100);
+    }
     DEBUG_INFO("[GYRO] configureFifo: FIFO enabled (gyro+accel), SMPLRT_DIV=%d", smplrtDiv);
     return true;
 }
