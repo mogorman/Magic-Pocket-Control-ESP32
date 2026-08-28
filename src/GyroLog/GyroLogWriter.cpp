@@ -29,12 +29,17 @@
 // [DIAG] 1 = the sampler task just sleeps (no ring write, no semaphore) to test
 // whether the sampler's per-tick work is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_SAMPLER_WORK
-#define GYRO_SKIP_SAMPLER_WORK 1
+#define GYRO_SKIP_SAMPLER_WORK 0
 #endif
 // [DIAG] 1 = the writer task just sleeps (no ring drain, no SD write) to test
 // whether the writer's work is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_WRITER_WORK
 #define GYRO_SKIP_WRITER_WORK 1
+#endif
+// [DIAG] 1 = the sampler does the I2C read but skips the ring write + semaphore
+// to test whether the ring/semaphore path is the leak source. 0 = normal.
+#ifndef GYRO_SKIP_RING_WRITE
+#define GYRO_SKIP_RING_WRITE 1
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
@@ -378,6 +383,11 @@ uint32_t GyroLogWriter::pollOutputRegisters()
         (long)rawGx, (long)rawGy, (long)rawGz,
         (long)rawAx, (long)rawAy, (long)rawAz);
 
+#if GYRO_SKIP_RING_WRITE
+    // [DIAG] skip the ring write + semaphore (tests whether the ring/semaphore
+    // path is the leak source; the I2C read above still runs).
+    (void)n;
+#else
     if(xSemaphoreTake(_ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
     {
         _ring.write((const uint8_t*)row, (size_t)n);
@@ -385,6 +395,7 @@ uint32_t GyroLogWriter::pollOutputRegisters()
         if(_dataSem)
             xSemaphoreGive(_dataSem); // wake the writer
     }
+#endif
     _fifoSeq++;
     return 1;
 }
