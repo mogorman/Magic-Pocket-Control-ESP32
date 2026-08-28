@@ -897,7 +897,7 @@ void GyroLogWriter::startSamplerTask()
     // (letting the main loop run) and tight-spins only in the final sub-tick
     // window for grid accuracy.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 0);
+        this, 1, &_samplerTask, 1);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());

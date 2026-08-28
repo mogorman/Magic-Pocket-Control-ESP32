@@ -4788,4 +4788,13 @@ void loop() {
   // early when nothing has changed), so a fast loop is safe, and it lets
   // gyroLog.poll() at the top of loop() hit its 1 ms (1 kHz) cadence instead of
   // being throttled to ~166 Hz by a fixed 5 ms pause.
+  //
+  // While a GCSV recording is running, the 1 kHz sampler task shares core 1 with
+  // this main loop at the same priority (1). FreeRTOS time-slices equal-priority
+  // tasks, but a long main-loop iteration can consume a whole tick and starve the
+  // sampler's grid timing (it then only lands on a fraction of the 1 ms
+  // boundaries). Yielding a tick at the end of each iteration during a recording
+  // guarantees the sampler a timeslice so it can hit the grid.
+  if(gyroLog.isRecording())
+    vTaskDelay(1);
 }
