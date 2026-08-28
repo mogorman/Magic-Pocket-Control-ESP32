@@ -1,3 +1,6 @@
+// [DIAG-ONLY, temporary] Set to 1 to skip the actual SD write and test whether
+// the SD/SPI activity is what degrades the 1 kHz I2C sampling. Remove after test.
+#define GYRO_SKIP_SD_WRITE 1
 #include "GyroLogWriter.h"
 #include <M5Unified.h>
 #include <nvs.h>
