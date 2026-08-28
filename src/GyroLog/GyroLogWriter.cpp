@@ -388,27 +388,82 @@ void GyroLogWriter::configurePolling()
     _fifoConfigured = true;
 }
 
+// Initialize the native hardware I2C bus (port 1, SDA=21, SCL=22) for the fast
+// 1 kHz output-register read. We re-init the same peripheral M5Unified uses, but
+// with our chosen clock. This is safe because during a recording we skip
+// M5Unified's IMU polling (see the main loop), so we own the bus. Called from
+// begin().
+void GyroLogWriter::beginImuWire()
+{
+    // The Core2's internal I2C (where the MPU6886 sits) is on port 1, SDA=21,
+    // SCL=22. Create a native TwoWire for that bus and init it at our clock.
+    // begin() returns false if the bus can't be initialized; in that case we fall
+    // back to the m5gfx driver (pollOutputRegisters checks _imuWireReady).
+    if(!_imuWire)
+        _imuWire = new TwoWire(1); // I2C_NUM_1
+    _imuWireReady = _imuWire->begin(21, 22, _i2cHz);
+    DEBUG_INFO("[GYRO] beginImuWire(): native I2C port1 @ %lu Hz -> %s",
+        (unsigned long)_i2cHz, _imuWireReady ? "OK" : "FAILED (will use m5gfx)");
+}
+
+// Restore the I2C bus to M5Unified's default (400 kHz) after a recording, so any
+// later M5Unified use (calibration screen, etc.) sees it the way it expects.
+// Called from end().
+void GyroLogWriter::restoreImuWire()
+{
+    if(_imuWireReady && _imuWire)
+    {
+        _imuWire->end();
+        _imuWire->begin(21, 22, 400000); // back to M5Unified's default clock
+        _imuWireReady = false;
+    }
+}
+
 // Read the latest gyro+accel sample from the output registers and append one
 // dense GCSV row. The output registers (0x3B..0x48) always hold the most recent
-// sample: accel X/Y/Z (6 B), temp (2 B), gyro X/Y/Z (6 B) = 14 bytes. We read
-// them in a single I2C transaction and write one row with the running _fifoSeq
-// as the "t" index. Because the sampler calls this exactly once per 1 ms tick,
-// the "t" index is dense (0,1,2,...) and the timeline is accurate.
+// sample: accel X/Y/Z (6 B), temp (2 B), gyro X/Y/Z (6 B) = 14 bytes.
+//
+// We use the NATIVE hardware I2C bus (TwoWire on port 1) for this read: it does
+// the pointer-write + 14-byte data-read in a SINGLE transaction (repeated start,
+// no stop between), which is much faster and more reliable than the m5gfx
+// driver's multi-transaction approach. Because the sampler calls this exactly
+// once per 1 ms tick, the "t" index is dense (0,1,2,...) and the timeline is
+// accurate.
 uint32_t GyroLogWriter::pollOutputRegisters()
 {
     uint8_t buf[14];
-    // Read 14 bytes starting at 0x3B (the output-register block). Retry a couple
-    // of times on an I2C glitch (a single atomic read; a failure means no data
-    // was transferred, so a retry re-reads the same latest sample).
-    bool ok = false;
-    for(int attempt = 0; attempt < 3 && !ok; attempt++)
+
+    if(_imuWireReady && _imuWire)
     {
-        ok = M5.In_I2C.readRegister(kImuAddr, 0x3B, buf, 14, _i2cHz);
+        // Native single-transaction read: write the register pointer (0x3B) with
+        // NO stop (endTransmission(false)), then request 14 bytes with NO stop
+        // (requestFrom(..., false)) -- the repeated start keeps it one transaction.
+        _imuWire->beginTransmission(kImuAddr);
+        _imuWire->write(0x3B);
+        _imuWire->endTransmission(false); // repeated start (no stop)
+        uint8_t got = _imuWire->requestFrom((uint16_t)kImuAddr, (uint8_t)14, (uint8_t)0);
+        if(got != 14)
+        {
+            _i2cFailures++;
+            return 0; // this tick's sample is lost; the next tick recovers
+        }
+        for(int i = 0; i < 14; i++)
+            buf[i] = _imuWire->read();
     }
-    if(!ok)
+    else
     {
-        _i2cFailures++;
-        return 0; // this tick's sample is lost (a single gap); the next tick recovers
+        // Fallback: the m5gfx driver (slower, but works if the native bus init
+        // failed). Retry a couple times on a glitch.
+        bool ok = false;
+        for(int attempt = 0; attempt < 3 && !ok; attempt++)
+        {
+            ok = M5.In_I2C.readRegister(kImuAddr, 0x3B, buf, 14, _i2cHz);
+        }
+        if(!ok)
+        {
+            _i2cFailures++;
+            return 0;
+        }
     }
 
     int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
@@ -636,6 +691,9 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     // faster than the I2C bus can drain losslessly; at 1 kHz the I2C load is
     // trivial and the sample index is dense by construction.
     configurePolling();
+    // Set up the native hardware I2C bus for the fast 1 kHz read (we own the bus
+    // during the recording; M5Unified's IMU polling is skipped meanwhile).
+    beginImuWire();
 
     // The GCSV "timestamp" field is a UNIX timestamp (seconds since 1970-01-01
     // 00:00:00 UTC) and is optional (Gyroflow syncs on the "t" column, not
@@ -1598,6 +1656,9 @@ bool GyroLogWriter::end()
     M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // FIFO_EN = 0 (disable FIFO)
     M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000); // clock src = 8 MHz RC (M5Unified default)
     _fifoConfigured = false;
+    // Restore the native I2C bus to M5Unified's default clock so later M5Unified
+    // use (calibration screen, etc.) sees it unchanged.
+    restoreImuWire();
     DEBUG_INFO("[GYRO-DIAG] end(): sensor-restore (I2C) took %lu us", (unsigned long)(micros() - tEnter));
     tEnter = micros();
 
