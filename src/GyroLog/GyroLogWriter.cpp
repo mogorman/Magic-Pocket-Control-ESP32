@@ -15,6 +15,12 @@
 #ifndef GYROLOG_DEBUG
 #define GYROLOG_DEBUG 0
 #endif
+// [DIAG] 1 = the writer copies the ring out but skips the actual SD card write.
+// Used to test whether the SD/SPI write path is what corrupts the heap on long
+// recordings. 0 = normal (write to the card).
+#ifndef GYRO_SKIP_SD_WRITE
+#define GYRO_SKIP_SD_WRITE 1
+#endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
 //
@@ -627,8 +633,12 @@ void GyroLogWriter::drainRing()
     xSemaphoreGive(_ringMutex);
 
     // Phase 2: slow SD write of the copied bytes, WITHOUT the mutex.
+#if GYRO_SKIP_SD_WRITE
+    (void)copied; // diagnostic: skip the card write
+#else
     if(copied > 0)
         _file.write(s_scratch, copied);
+#endif
 }
 
 // The writer task's main loop. It waits (with a short timeout) for the sampler
