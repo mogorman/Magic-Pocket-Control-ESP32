@@ -762,17 +762,28 @@ void GyroLogWriter::samplerTask()
             nextBoundaryUs = ((now / 1000) + 1) * 1000;
         }
 
-        // Wait until the next 1 ms boundary using a TIGHT spin on the microsecond
-        // timer (no vTaskDelay in the wait -- a vTaskDelay(1) can overshoot the
-        // boundary by up to a full tick because it wakes on the next tick, which
-        // is what made the read start late and cost us ~6% of the samples). A pure
-        // spin is microsecond-accurate. We only yield to the writer AFTER the read
-        // (in the slack), so the wait itself never deschedules us.
-        while(esp_timer_get_time() < nextBoundaryUs)
+        // Wait until the next 1 ms boundary. Two phases:
+        //   1. While there's more than one tick (~1 ms) to the boundary, sleep a
+        //      tick (vTaskDelay). This is the crucial part: a pure spin here would
+        //      starve the CPU-0 idle task (IDLE0, priority 0) -- the sampler runs
+        //      at priority 5 and portYIELD() only yields to equal/higher-priority
+        //      tasks, never to IDLE0 -- and the task watchdog (which needs the idle
+        //      task to run) aborts the CPU after ~35 s. Sleeping a tick lets IDLE0
+        //      run and keeps the watchdog happy.
+        //   2. In the final sub-tick window (<= ~1 ms to the boundary), tight-spin
+        //      on the microsecond timer for microsecond accuracy (a vTaskDelay here
+        //      would overshoot the boundary by up to a full tick and make the read
+        //      start late).
+        while(true)
         {
-            // tight spin; portYIELD() lets same-priority tasks run but does NOT
-            // sleep, so we stay pinned to the boundary.
-            portYIELD();
+            int64_t now = esp_timer_get_time();
+            int64_t toGo = nextBoundaryUs - now;
+            if(toGo <= 0)
+                break;
+            if(toGo > 1000) // > 1 ms to go: sleep a tick so IDLE0 runs
+                vTaskDelay(1);
+            else
+                portYIELD(); // final sub-tick: tight spin for accuracy
         }
 
         // Read the latest sample exactly on the boundary and append one dense row.
@@ -803,15 +814,11 @@ void GyroLogWriter::samplerTask()
         (void)readUs;
 #endif
 
-        // Advance to the next 1 ms boundary. We do NOT vTaskDelay here: a
-        // vTaskDelay(1) waits a full tick (~1 ms), which -- added on top of the
-        // ~0.4-0.5 ms read -- pushed the total loop over 1 ms (especially as the
-        // read creeps up over a long recording) and cost us ~5-7% of samples. The
-        // next iteration's spin-wait (portYIELD loop) waits out the remaining time
-        // to the next boundary with microsecond accuracy and no extra tick. The
-        // writer (lower priority) still runs: it's woken by _dataSem and the
-        // spin-wait's portYIELD() lets it in when the sampler is between reads; the
-        // 128 KB ring absorbs the writer's occasional delay.
+        // Advance to the next 1 ms boundary. The next iteration's wait (above)
+        // sleeps a tick while there's slack (so IDLE0 runs and the watchdog stays
+        // happy) and tight-spins only in the final sub-tick window for accuracy.
+        // The writer (priority 6) still runs: it's woken by _dataSem and preempts
+        // the sampler briefly to flush the ring; the 128 KB ring absorbs that.
         nextBoundaryUs += 1000;
     }
 }
