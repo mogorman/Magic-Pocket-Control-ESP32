@@ -24,7 +24,12 @@
 // [DIAG] 1 = the sampler skips the actual MPU6886 I2C read (writes a dummy row
 // instead) to test whether the I2C read is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_IMU_READ
-#define GYRO_SKIP_IMU_READ 1
+#define GYRO_SKIP_IMU_READ 0
+#endif
+// [DIAG] 1 = the sampler task just sleeps (no ring write, no semaphore) to test
+// whether the sampler's per-tick work is what leaks internal RAM. 0 = normal.
+#ifndef GYRO_SKIP_SAMPLER_WORK
+#define GYRO_SKIP_SAMPLER_WORK 1
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
@@ -773,6 +778,13 @@ void GyroLogWriter::samplerTask()
             nextBoundaryUs = 0; // resync the grid on (re)start
             continue;
         }
+
+#if GYRO_SKIP_SAMPLER_WORK
+        // [DIAG] do nothing per tick (no ring write, no semaphore) -- just sleep a
+        // tick. Tests whether the sampler's per-tick work is the leak source.
+        vTaskDelay(1);
+        continue;
+#endif
 
         // Compute the next 1 ms boundary (in esp_timer us) if we haven't yet.
         if(nextBoundaryUs == 0)
