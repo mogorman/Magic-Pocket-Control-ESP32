@@ -4140,7 +4140,7 @@ void setup() {
 // How long (ms) to wait after boot before the E2E test triggers the record
 // start, so the UI/camera-connection code has a moment to settle.
 #ifndef GYRO_E2E_SETTLE_MS
-#define GYRO_E2E_SETTLE_MS 999999
+#define GYRO_E2E_SETTLE_MS 3000
 #endif
 
 #if GYRO_E2E_TEST

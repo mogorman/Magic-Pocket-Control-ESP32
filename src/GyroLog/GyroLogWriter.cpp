@@ -29,7 +29,7 @@
 // [DIAG] 1 = the sampler task just sleeps (no ring write, no semaphore) to test
 // whether the sampler's per-tick work is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_SAMPLER_WORK
-#define GYRO_SKIP_SAMPLER_WORK 0
+#define GYRO_SKIP_SAMPLER_WORK 1
 #endif
 // [DIAG] 1 = the writer task just sleeps (no ring drain, no SD write) to test
 // whether the writer's work is what leaks internal RAM. 0 = normal.
