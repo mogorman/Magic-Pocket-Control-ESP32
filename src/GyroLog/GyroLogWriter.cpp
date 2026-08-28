@@ -19,7 +19,12 @@
 // Used to test whether the SD/SPI write path is what corrupts the heap on long
 // recordings. 0 = normal (write to the card).
 #ifndef GYRO_SKIP_SD_WRITE
-#define GYRO_SKIP_SD_WRITE 1
+#define GYRO_SKIP_SD_WRITE 0
+#endif
+// [DIAG] 1 = the sampler skips the actual MPU6886 I2C read (writes a dummy row
+// instead) to test whether the I2C read is what leaks internal RAM. 0 = normal.
+#ifndef GYRO_SKIP_IMU_READ
+#define GYRO_SKIP_IMU_READ 1
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
@@ -329,6 +334,11 @@ void GyroLogWriter::configurePolling()
 uint32_t GyroLogWriter::pollOutputRegisters()
 {
     uint8_t buf[14];
+#if GYRO_SKIP_IMU_READ
+    // [DIAG] skip the real I2C read; fill with a pattern so the loop/ring path
+    // still runs. Used to test whether the I2C read is the source of the leak.
+    for(int i = 0; i < 14; i++) buf[i] = (uint8_t)(i * 7 + 1);
+#else
     // Read 14 bytes starting at 0x3B (the output-register block). Retry a couple
     // of times on an I2C glitch (a single atomic read; a failure means no data
     // was transferred, so a retry re-reads the same latest sample).
@@ -342,6 +352,7 @@ uint32_t GyroLogWriter::pollOutputRegisters()
         _i2cFailures++;
         return 0; // this tick's sample is lost (a single gap); the next tick recovers
     }
+#endif
 
     int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
     int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
