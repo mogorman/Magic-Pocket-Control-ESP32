@@ -1,6 +1,3 @@
-// [DIAG-ONLY, temporary] Set to 1 to skip the actual SD write and test whether
-// the SD/SPI activity is what degrades the 1 kHz I2C sampling. Remove after test.
-#define GYRO_SKIP_SD_WRITE 1
 #include "GyroLogWriter.h"
 #include <M5Unified.h>
 #include <nvs.h>
@@ -1155,11 +1152,16 @@ void GyroLogWriter::samplerTask()
             }
         }
 
-        // Advance to the next 1 ms boundary. The read finished early (~0.4-0.6 ms
-        // < 1 ms), so we have slack; yield a tick so the writer can commit the
-        // ring, then the spin above waits out the rest of the interval.
+        // Advance to the next 1 ms boundary. We do NOT vTaskDelay here: a
+        // vTaskDelay(1) waits a full tick (~1 ms), which -- added on top of the
+        // ~0.4-0.5 ms read -- pushed the total loop over 1 ms (especially as the
+        // read creeps up over a long recording) and cost us ~5-7% of samples. The
+        // next iteration's spin-wait (portYIELD loop) waits out the remaining time
+        // to the next boundary with microsecond accuracy and no extra tick. The
+        // writer (lower priority) still runs: it's woken by _dataSem and the
+        // spin-wait's portYIELD() lets it in when the sampler is between reads; the
+        // 128 KB ring absorbs the writer's occasional delay.
         nextBoundaryUs += 1000;
-        vTaskDelay(1);
     }
 }
 
