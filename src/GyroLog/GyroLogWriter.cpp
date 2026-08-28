@@ -688,20 +688,18 @@ void GyroLogWriter::startWriterTask()
         return; // already running
     _writerStop = false;
     // 8 KB stack: the task only does a FatFile::write of a few KB, so this is
-    // ample. Pinned to CORE 0 at priority 6 (ABOVE the sampler's 5).
+    // ample. Pinned to CORE 1 at priority 1 (same as the main loop and the
+    // sampler).
     //
-    // Why priority 6 (above the sampler): the sampler's 1 ms spin-wait is a tight
-    // loop that only yields to same-or-HIGHER priority tasks (portYIELD). The
-    // writer used to be at priority 2 (below the sampler), so the sampler's tight
-    // loop never let the writer run -- the ring filled, the writer starved, and
-    // the _ringMutex/_dataSem bookkeeping tripped a FreeRTOS mutex-ownership
-    // assert. At priority 6 the writer PREEMPTS the sampler whenever it has a
-    // batch to flush (woken by _dataSem), does its few-ms SD write, and the
-    // sampler resumes and re-locks to the 1 ms grid (the spin-wait waits to the
-    // next boundary). The writer only runs every ~100 ms for a few ms, so the
-    // preemptions are brief and the grid stays dense.
+    // Both the sampler and the writer live on core 1 at priority 1 (the Arduino
+    // main loop's priority), so all three time-slice fairly within each tick --
+    // none starves the others. (A higher-priority sampler/writer on core 1 hung
+    // the main loop; a sampler on core 0 starved the BLE idle task and tripped
+    // the task watchdog.) The writer only wakes every ~100 ms to flush a 16 KB
+    // batch, so its brief SD writes don't meaningfully disturb the 1 kHz sampler;
+    // the 128 KB ring absorbs the rest.
     xTaskCreatePinnedToCore(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
-        this, 6, &_writerTask, 0);
+        this, 1, &_writerTask, 1);
 }
 
 void GyroLogWriter::stopWriterTask()
@@ -828,23 +826,27 @@ void GyroLogWriter::startSamplerTask()
     if(_samplerTask != nullptr)
         return; // already created (persistent task)
     // 4 KB stack: the task only does a small I2C read and a ring append, so
-    // this is ample. Pinned to CORE 1 at priority 5.
+    // this is ample. Pinned to CORE 1 at priority 1 (the same priority as the
+    // Arduino main loop).
     //
-    // Why core 1 and not core 0: the BLE controller task (BTC_TASK) runs on
-    // core 0. During an active BLE recording it runs at a high priority and,
-    // together with a sampler on the same core, starves the core-0 idle task
-    // (IDLE0) -- the task watchdog (which needs the idle task to run) then
-    // aborts the CPU after ~35 s. Putting the sampler on core 1 (with the main
-    // loop) keeps core 0 free for the BLE stack and its idle task. The sampler's
-    // wait sleeps a tick while there's slack (so it coexists with the main loop)
-    // and tight-spins only in the final sub-tick window for grid accuracy.
+    // Core choice: core 1, NOT core 0. The BLE controller task (BTC_TASK) runs
+    // on core 0; a sampler there starves the core-0 idle task (IDLE0) and the
+    // task watchdog aborts the CPU after ~35 s.
+    //
+    // Priority choice: 1 (== the main loop's priority), NOT higher. A sampler at
+    // a higher priority on the same core as the main loop preempts it and the
+    // main loop never runs (it hung after the record started). At equal priority
+    // FreeRTOS time-slices the two within each tick, so the main loop and the
+    // sampler both run. The sampler's wait sleeps a tick while there's slack
+    // (letting the main loop run) and tight-spins only in the final sub-tick
+    // window for grid accuracy.
     BaseType_t rc = xTaskCreatePinnedToCore(&GyroLogWriter::samplerTaskTrampoline, "gyroSampler", 4096,
-        this, 5, &_samplerTask, 1);
+        this, 1, &_samplerTask, 1);
     if(rc != pdPASS || _samplerTask == nullptr)
         DEBUG_ERROR("[GYRO-DIAG] startSamplerTask(): FAILED rc=%d (freeHeap=%lu, freePsram=%lu) -- sampler will NOT run",
             (int)rc, (unsigned long)ESP.getFreeHeap(), (unsigned long)ESP.getFreePsram());
     else
-        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 5, persistent)");
+        DEBUG_INFO("[GYRO-DIAG] startSamplerTask(): OK (core 1, prio 1, persistent)");
 }
 
 void GyroLogWriter::stopSamplerTask()
