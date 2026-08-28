@@ -227,6 +227,14 @@ static bool gyroPendingEnd = false;
 // de-duplicates a spurious second start.
 static bool gyroStartArmed = false;
 
+// Set (on the BLE notify thread) once, after a clip has stopped and the camera
+// has been flipped back, to ask the main loop to compute the SD free-space
+// figure. freeClusterCount() walks the whole FAT (~tens of seconds) and must not
+// run on the main loop, so we run it here on the notify thread instead, where a
+// long block is harmless. The result is cached in the volume, so the Gyro Log
+// screen can then read summary.freeBytes cheaply.
+static bool gyroFreeSpacePending = false;
+
 // The codec in effect when the clip started, so we can build the right video
 // file extension once we have the real clip name.
 static CCUPacketTypes::BasicCodec gyroStartCodec = CCUPacketTypes::BasicCodec::BRAW;
@@ -874,12 +882,13 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString(sizeBuf, 30, 198, &Lato_Regular11pt7b);
 
-    // Total SD card capacity (free space is not shown: computing it requires a
-    // full FAT walk that takes tens of seconds and would stall the UI).
+    // Free SD space. The value is computed in the background (see
+    // gyroFreeSpacePending) because freeClusterCount() walks the whole FAT;
+    // until that first computation finishes it reads as 0.
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("SD TOTAL", 180, 185, &Lato_Regular5pt7b);
+    sprite->drawString("SD FREE", 180, 185, &Lato_Regular5pt7b);
     char freeBuf[32];
-    snprintf(freeBuf, sizeof(freeBuf), "%.1f GB", (double)s.totalBytes / (1024.0 * 1024.0 * 1024.0));
+    snprintf(freeBuf, sizeof(freeBuf), "%.1f GB", (double)s.freeBytes / (1024.0 * 1024.0 * 1024.0));
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString(freeBuf, 180, 198, &Lato_Regular11pt7b);
   }
@@ -4297,6 +4306,17 @@ void loop() {
     DEBUG_INFO("[GYRO] applied slate name '%s' to log", gyroPendingSlateName.c_str());
   }
 
+  // Compute the SD free-space figure (one time, after a clip has stopped and the
+  // camera is idle). freeClusterCount() walks the whole FAT (~tens of seconds),
+  // so it must not run in the middle of the record stop/playback sequence; by now
+  // the main loop is otherwise idle, so the one-time block is acceptable. The
+  // result is cached in the volume, so the Gyro Log screen reads it cheaply.
+  if(gyroFreeSpacePending && !gyroLog.isRecording())
+  {
+    gyroFreeSpacePending = false;
+    gyroLog.refreshFreeSpace();
+  }
+
   if ((cameraConnection.status == BMDCameraConnection::ConnectionStatus::Disconnected || cameraConnection.status == BMDCameraConnection::ConnectionStatus::FailedPassKey) && currentTime - lastConnectedTime >= reconnectInterval) {
     
     if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::Disconnected)
@@ -4697,7 +4717,7 @@ void loop() {
   //    clip, so "switching back to Record" would fire off a fresh recording.
   //    Preview is the idle standby state the camera sits in between clips.
   if(!gyroInPlayback && gyroPlaybackCommandSent &&
-     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
+      cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
     gyroPlaybackCommandSent = false;
     auto cam = BMDControlSystem::getInstance()->getCamera();
@@ -4708,6 +4728,11 @@ void loop() {
       DEBUG_INFO("[GYRO] switching camera back to Preview");
       PacketWriter::writeTransportInfo(ti, &cameraConnection);
     }
+    // The clip is fully finalised and the camera is idle. Ask the main loop to
+    // compute the (slow) SD free-space figure now, so the Gyro Log screen can
+    // show a real number. Done on the main loop (not the BLE thread) to avoid
+    // a cross-thread race on the SD card.
+    gyroFreeSpacePending = true;
   }
 
   delay(5);

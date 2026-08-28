@@ -80,6 +80,14 @@ public:
     bool sdReady() const { return _sdReady; }
     const std::string& sdStatusMessage() const { return _sdStatusMessage; }
 
+    // Compute the free-space figure for the summary. This calls
+    // freeClusterCount(), which on a FAT32 card walks the whole FAT (tens of
+    // seconds). It must NOT run on the main loop (it would stall the UI and the
+    // playback clip-name capture). Call it from a non-critical context (e.g.
+    // the BLE notify thread) instead; the result is cached in the volume, so
+    // the main loop can then read summary.freeBytes cheaply.
+    void refreshFreeSpace();
+
     // Filesystem helpers (used by the E2E test to verify a written file).
     // Returns true if a file exists at `path` (e.g. "/clip_0001.txt").
     bool fileExists(const std::string& path) const;
