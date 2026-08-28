@@ -29,7 +29,12 @@
 // [DIAG] 1 = the sampler task just sleeps (no ring write, no semaphore) to test
 // whether the sampler's per-tick work is what leaks internal RAM. 0 = normal.
 #ifndef GYRO_SKIP_SAMPLER_WORK
-#define GYRO_SKIP_SAMPLER_WORK 1
+#define GYRO_SKIP_SAMPLER_WORK 0
+#endif
+// [DIAG] 1 = the writer task just sleeps (no ring drain, no SD write) to test
+// whether the writer's work is what leaks internal RAM. 0 = normal.
+#ifndef GYRO_SKIP_WRITER_WORK
+#define GYRO_SKIP_WRITER_WORK 1
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
@@ -681,6 +686,13 @@ void GyroLogWriter::writerTask()
             xSemaphoreTake(_dataSem, pdMS_TO_TICKS(20));
             continue;
         }
+
+#if GYRO_SKIP_WRITER_WORK
+        // [DIAG] do nothing (no ring drain, no SD write) -- just sleep a tick.
+        // Tests whether the writer's work is the leak source.
+        vTaskDelay(1);
+        continue;
+#endif
 
         // Wait for the sampler to append data, or for the poll timeout. The 20 ms
         // timeout keeps the stop/interval checks responsive without busy-spinning.
