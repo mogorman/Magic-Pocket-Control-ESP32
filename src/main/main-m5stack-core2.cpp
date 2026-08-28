@@ -4069,10 +4069,12 @@ void setup() {
   // One-shot FIFO rate self-test: enable the gyro+accel FIFO and measure how
   // many packets/second the I2C bus can actually drain. Runs before the camera
   // connection so it doesn't interfere with the E2E test.
-  DEBUG_INFO("[GYRO-FIFO] running FIFO rate self-test...");
-  gyroLog.configureFifo(0); // SMPLRT_DIV = 0 (sensor's native rate)
+  // SMPLRT_DIV = 1 -> datasheet: 1kHz/(1+1) = 500 Hz on a spec chip. On this
+  // clone the internal clock runs ~2.34x faster, so we expect ~1.17 kHz.
+  DEBUG_INFO("[GYRO-FIFO] running FIFO rate self-test (SMPLRT_DIV=1)...");
+  gyroLog.configureFifo(1); // SMPLRT_DIV = 1
   float fifoRate = gyroLog.measureFifoRate();
-  DEBUG_INFO("[GYRO-FIFO] measured FIFO rate = %.1f Hz", fifoRate);
+  DEBUG_INFO("[GYRO-FIFO] measured FIFO rate = %.1f Hz (target ~1.17 kHz)", fifoRate);
 #endif
 
   tft.setColorDepth(16);
