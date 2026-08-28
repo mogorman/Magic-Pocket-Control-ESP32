@@ -22,10 +22,10 @@
 #ifndef GYRO_E2E_DURATION_S
 #define GYRO_E2E_DURATION_S 10
 #endif
-// How long (ms) to wait after boot before the E2E test triggers the record
-// start, so the UI/SD code has a moment to settle.
+// How long (ms) to wait AFTER the camera is connected before the E2E test
+// triggers the record start, so the connection/SD code has a moment to settle.
 #ifndef GYRO_E2E_SETTLE_MS
-#define GYRO_E2E_SETTLE_MS 10000
+#define GYRO_E2E_SETTLE_MS 3000
 #endif
 
 // The output format is: >>[state]:[state value]
@@ -4114,6 +4114,8 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 static int e2eState = 0;
 static uint32_t e2eStartMs = 0;     // millis() when the record start was sent
 static uint32_t e2eStopMs = 0;      // millis() when the record stop was sent
+static uint32_t e2eConnectedMs = 0; // millis() when the camera first connected
+static bool e2eConnectedSeen = false;
 static std::string e2eClipName;      // the generic name we started the file with
 static std::string e2eRealName;     // the real clip name the camera reported
 
@@ -4122,14 +4124,23 @@ static void gyroE2ETestTick()
   auto cam = BMDControlSystem::getInstance()->getCamera();
   bool connected = (cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected);
 
+  // Note when the camera first connects, so we can settle for a fixed time
+  // after connection (rather than a fixed time after boot).
+  if(connected && !e2eConnectedSeen)
+  {
+    e2eConnectedSeen = true;
+    e2eConnectedMs = millis();
+  }
+
   switch(e2eState)
   {
     case 0:
     {
-      // Wait for the settle delay AND a connected camera with a transport mode
-      // (we need to send it a real Record command). The camera connects a few
-      // seconds after boot, so gate on that rather than a fixed delay alone.
-      if(millis() >= GYRO_E2E_SETTLE_MS && connected && cam && cam->hasTransportMode())
+      // Wait until the camera is connected AND the post-connection settle delay
+      // has elapsed, then send the camera a real RECORD command and queue the
+      // gyro-log start (which creates the hello-world file).
+      if(connected && cam && cam->hasTransportMode() &&
+         (millis() - e2eConnectedMs >= GYRO_E2E_SETTLE_MS))
       {
         e2eClipName = nextGyroClipName();
         gyroPendingStart.clipName = e2eClipName;
