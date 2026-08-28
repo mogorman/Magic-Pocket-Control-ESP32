@@ -4116,6 +4116,136 @@ void setup() {
   // register the handler lazily in loop() once a camera exists (see below).
 }
 
+// End-to-end self-test. Set GYRO_E2E_TEST to 1 to run it (default 0 = compiled
+// out for a clean production build). It does NOT skip the normal UI: it boots
+// into the real app, then drives the production record path exactly as the
+// camera's record button would:
+//   1. after a short settle delay, queue a record START (sets gyroPendingStart,
+//      which the main loop turns into gyroLog.begin());
+//   2. after GYRO_E2E_DURATION_S seconds of recording, queue a record STOP
+//      (sets gyroPendingEnd, which the main loop turns into gyroLog.end());
+//   3. once end() has closed the file, read the .gcsv back and count the sample
+//      rows, then report the measured count vs the expected count (duration x
+//      measured sample rate) and a PASS/FAIL.
+// This exercises the full production path (sampler task reading the IMU, writer
+// task committing to the card, end() flush) and verifies the recorded sample
+// count is correct for the clip duration.
+#ifndef GYRO_E2E_TEST
+#define GYRO_E2E_TEST 0
+#endif
+// How long (seconds) the E2E test records before stopping.
+#ifndef GYRO_E2E_DURATION_S
+#define GYRO_E2E_DURATION_S 20
+#endif
+// How long (ms) to wait after boot before the E2E test triggers the record
+// start, so the UI/camera-connection code has a moment to settle.
+#ifndef GYRO_E2E_SETTLE_MS
+#define GYRO_E2E_SETTLE_MS 3000
+#endif
+
+#if GYRO_E2E_TEST
+// The E2E test's state machine. It runs on the main loop (called from loop())
+// and only sets the same pending flags the real record button sets, so the
+// actual begin()/end() happen in the normal loop() code path.
+//   0 = waiting to start   1 = recording   2 = stopped, about to verify
+//   3 = done (reported)
+static int e2eState = 0;
+static uint32_t e2eStartMs = 0;   // millis() when the record start was queued
+static std::string e2eClipName;  // the clip name we started (to find the file)
+
+static void gyroE2ETestTick()
+{
+  switch(e2eState)
+  {
+    case 0:
+    {
+      // Wait for the settle delay, then queue a record start (exactly what the
+      // record button does: fill gyroPendingStart and set valid).
+      if(millis() >= GYRO_E2E_SETTLE_MS)
+      {
+        e2eClipName = nextGyroClipName();
+        gyroPendingStart.clipName = e2eClipName;
+        gyroPendingStart.ext = "mov";
+        gyroPendingStart.timecode = "00:00:00:00";
+        gyroPendingStart.lensInfo = "";
+        gyroPendingStart.valid = true;
+        e2eStartMs = millis();
+        e2eState = 1;
+        DEBUG_INFO("[GYRO-E2E] queued record START for '%s'", e2eClipName.c_str());
+      }
+      break;
+    }
+    case 1:
+    {
+      // Recording. After the target duration, queue a record stop.
+      if(millis() - e2eStartMs >= (uint32_t)GYRO_E2E_DURATION_S * 1000UL)
+      {
+        gyroPendingEnd = true;
+        e2eState = 2;
+        DEBUG_INFO("[GYRO-E2E] queued record STOP after %d s", GYRO_E2E_DURATION_S);
+      }
+      break;
+    }
+    case 2:
+    {
+      // The main loop has called end() (gyroLog is no longer recording). Read the
+      // GCSV back and verify the sample count.
+      if(!gyroLog.isRecording())
+      {
+        char path[128];
+        snprintf(path, sizeof(path), "/%s.gcsv", e2eClipName.c_str());
+        long samples = gyroLog.countSamplesInFile(path);
+
+        // The expected sample count is the wall-clock duration times the sample
+        // rate. measuredRateHz() = 1/_tscale, and _tscale is 1 ms for the 1 kHz
+        // poll, so this is ~1000 Hz. If the sampler kept up, the recorded count
+        // should match this; a big shortfall means samples were lost.
+        double wallSec = (double)GYRO_E2E_DURATION_S;
+        double rateHz = (double)gyroLog.measuredRateHz();
+        long expected = (long)(wallSec * rateHz);
+
+        if(samples < 0)
+        {
+          DEBUG_ERROR("[GYRO-E2E] FAIL: could not read back '%s' (open failed)", path);
+        }
+        else
+        {
+          // The headline line: the actual recorded sample count vs the expected.
+          DEBUG_INFO("[GYRO-E2E] RECORDED %ld samples (expected ~%ld at %.0f Hz over %.1f s)",
+            (long)samples, (long)expected, rateHz, wallSec);
+          // Diagnostics: I2C read failures (non-zero at a high clock = clock too
+          // fast for the sensor).
+          DEBUG_INFO("[GYRO-E2E] i2cFailures=%lu",
+            (unsigned long)gyroLog.i2cFailures());
+
+          // PASS if the recorded count is within 20% of the expected count.
+          bool ok = (expected > 0) && (samples >= (long)(expected * 0.80)) && (samples <= (long)(expected * 1.20));
+          DEBUG_INFO("[GYRO-E2E] data duration %lu ms vs wall %lu ms -> %s",
+            (unsigned long)gyroLog.getSummary().durationMs, (unsigned long)(wallSec * 1000), ok ? "PASS" : "FAIL");
+          if(!ok)
+            DEBUG_ERROR("[GYRO-E2E] FAIL: recorded %ld samples is not within 20%% of expected %ld (lost %ld samples?)",
+              (long)samples, (long)expected, (long)expected - (long)samples);
+
+          // Dump the file head (header + first few sample rows) to confirm the
+          // GCSV is well-formed for Gyroflow.
+          gyroLog.dumpFileHead(path, 400);
+          // Analyze the "t" index across the whole file: report the max gap and
+          // any backwards steps (resets) so we know the timeline is Gyroflow-
+          // usable, not just that samples exist.
+          gyroLog.analyzeTIndex(path);
+        }
+        e2eState = 3;
+      }
+      break;
+    }
+    case 3:
+    default:
+      // Done. Do nothing further; the normal UI continues.
+      break;
+  }
+}
+#endif // GYRO_E2E_TEST
+
 int memoryLoopCounter;
 bool forceRecordOutline = false; // Show the recording outline as we haven't done it yet
 
