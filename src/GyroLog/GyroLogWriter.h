@@ -314,12 +314,15 @@ private:
 
     // Writer batch policy: only commit to the card once a decent chunk is
     // buffered (kMinWriteBytes) or a max interval has passed (kMaxWriteIntervalUs).
-    // This keeps the SPI transaction rate low (a few per 10 ms instead of ~1000/
-    // s), which is what lets the I2C IMU read on the other core stay undisturbed.
-    // 80 KB is the practical max batch (240 KB caused intermittent shared-SPI-bus
-    // assert crashes); the 128 KB PSRAM ring holds it with headroom.
-    static const size_t kMinWriteBytes = 80 * 1024;
-    static const uint32_t kMaxWriteIntervalUs = 50 * 1000;
+    //
+    // We use SMALL, FREQUENT batches (16 KB every ~100 ms) rather than one big
+    // 80 KB batch: a big SPI write is a long burst of SPI DMA/interrupt activity
+    // that, while it runs, stretches the 1 kHz I2C sampler's reads past 1 ms
+    // (the source of our sample loss). A 16 KB burst is ~5x shorter, so each
+    // I2C read is far less likely to overlap an active SPI write. The 128 KB
+    // PSRAM ring holds several 16 KB batches with headroom.
+    static const size_t kMinWriteBytes = 16 * 1024;
+    static const uint32_t kMaxWriteIntervalUs = 100 * 1000;
     // Size of the PSRAM ring buffer (bytes). Must be >= kMinWriteBytes.
     static const size_t kRingSize = 128 * 1024;
 
