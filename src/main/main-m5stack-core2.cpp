@@ -4659,8 +4659,19 @@ void loop() {
   static bool gyroPlaybackCommandSent = false;
   static unsigned long gyroPlaybackWaitStart = 0;
 
+  // [DIAG] Confirm the main loop is still running and whether the playback
+  // block's guard is being met, to debug why the post-stop flow stalls.
+  static unsigned long diagLast = 0;
+  if(millis() - diagLast >= 2000)
+  {
+    diagLast = millis();
+    DEBUG_INFO("[GYRO-DIAG] loop alive: inPlayback=%d playSent=%d rec=%d pendEnd=%d slateValid=%d",
+      (int)gyroInPlayback, (int)gyroPlaybackCommandSent, (int)gyroLog.isRecording(),
+      (int)gyroPendingEnd, (int)gyroPendingSlateNameValid);
+  }
+
   if(gyroInPlayback &&
-     cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
+      cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)
   {
     // 1) Send the playback command once, right after the record stop.
     if(!gyroPlaybackCommandSent)
