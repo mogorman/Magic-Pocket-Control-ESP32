@@ -840,12 +840,6 @@ void Screen_GyroLog(bool forceRefresh = false)
   if(gyroLog.getSummary().valid)
   {
     // Summary mode: show the details of the last clip written.
-    // Refresh the (lazy) free-space figure here, off the record stop path.
-    // freeClusterCount() is cached after the first call, so this only does the
-    // (slow) FAT walk once; on later refreshes it's a cheap cached read.
-    if(gyroLog.getSummary().freeBytes == 0)
-      gyroLog.refreshFreeSpace();
-
     const GyroLogWriter::Summary& s = gyroLog.getSummary();
 
     sprite->setTextColor(TFT_LIGHTGREY);
@@ -880,11 +874,12 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString(sizeBuf, 30, 198, &Lato_Regular11pt7b);
 
-    // Remaining SD space
+    // Total SD card capacity (free space is not shown: computing it requires a
+    // full FAT walk that takes tens of seconds and would stall the UI).
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("SD FREE", 180, 185, &Lato_Regular5pt7b);
+    sprite->drawString("SD TOTAL", 180, 185, &Lato_Regular5pt7b);
     char freeBuf[32];
-    snprintf(freeBuf, sizeof(freeBuf), "%.1f GB", (double)s.freeBytes / (1024.0 * 1024.0 * 1024.0));
+    snprintf(freeBuf, sizeof(freeBuf), "%.1f GB", (double)s.totalBytes / (1024.0 * 1024.0 * 1024.0));
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString(freeBuf, 180, 198, &Lato_Regular11pt7b);
   }
@@ -4664,17 +4659,6 @@ void loop() {
   // writes happen here in the main loop, never the notify handler.
   static bool gyroPlaybackCommandSent = false;
   static unsigned long gyroPlaybackWaitStart = 0;
-
-  // [DIAG] Confirm the main loop is still running and whether the playback
-  // block's guard is being met, to debug why the post-stop flow stalls.
-  static unsigned long diagLast = 0;
-  if(millis() - diagLast >= 2000)
-  {
-    diagLast = millis();
-    DEBUG_INFO("[GYRO-DIAG] loop alive: inPlayback=%d playSent=%d rec=%d pendEnd=%d slateValid=%d",
-      (int)gyroInPlayback, (int)gyroPlaybackCommandSent, (int)gyroLog.isRecording(),
-      (int)gyroPendingEnd, (int)gyroPendingSlateNameValid);
-  }
 
   if(gyroInPlayback &&
       cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected)

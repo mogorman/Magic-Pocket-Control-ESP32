@@ -172,21 +172,6 @@ bool GyroLogWriter::end()
     return true;
 }
 
-void GyroLogWriter::refreshFreeSpace()
-{
-    if(_sd.fatType() == 0)
-        return; // not mounted
-
-    uint32_t bpc = _sd.bytesPerCluster();
-    uint32_t tFree = micros();
-    int32_t freeClusters = _sd.freeClusterCount();
-    uint32_t freeMs = (uint32_t)((micros() - tFree) / 1000UL);
-    if(freeClusters > 0)
-        _summary.freeBytes = (uint64_t)freeClusters * bpc;
-    DEBUG_INFO("[GYRO] refreshFreeSpace: freeClusters=%ld, took %lu ms",
-      (long)freeClusters, (unsigned long)freeMs);
-}
-
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
 {
     (void)extension;
