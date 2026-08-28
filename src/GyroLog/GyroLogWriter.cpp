@@ -367,9 +367,12 @@ bool GyroLogWriter::configureFifo(int smplrtDiv)
     // Sample-rate divider. 0 = no divider = the sensor's native rate.
     M5.In_I2C.writeRegister8(kImuAddr, 0x19, (uint8_t)smplrtDiv, kImuI2cHz);
 
-    // DLPF. CONFIG = 0x01 (44 Hz DLPF) is the highest setting where the sample
-    // rate divider still works; keep it as M5Unified set it.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x01, kImuI2cHz);
+    // DLPF + FIFO_MODE. CONFIG (0x1A): bit6 = FIFO_MODE, bits[2:0] = DLPF_CFG.
+    // FIFO_MODE=1 (bit6) means: when the FIFO is full, NEW samples are NOT written
+    // (the FIFO stays full) instead of overwriting the oldest. DLPF_CFG=1 (44 Hz)
+    // is the highest setting where the sample-rate divider still works. So 0x41
+    // = FIFO_MODE(1) | DLPF_CFG(1).
+    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x41, kImuI2cHz);
 
     // Enable the FIFO for gyro + accel (10 bytes per packet).
     M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x08, kImuI2cHz); // FIFO_EN: GYRO|ACCEL
@@ -387,8 +390,8 @@ bool GyroLogWriter::configureFifo(int smplrtDiv)
     uint8_t user = M5.In_I2C.readRegister8(kImuAddr, 0x6A, kImuI2cHz);
     uint8_t cntHi = M5.In_I2C.readRegister8(kImuAddr, 0x72, kImuI2cHz);
     uint8_t cntLo = M5.In_I2C.readRegister8(kImuAddr, 0x73, kImuI2cHz);
-    DEBUG_INFO("[GYRO] configureFifo readback: WHO_AM_I=0x%02X PWR=0x%02X (CLKSEL=%d) SMPL=0x%02X CFG=0x%02X FIFO_EN=0x%02X USER=0x%02X FIFO_COUNT=%u",
-        who, pwr, (pwr & 0x07), smpl, cfg, fifoEn, user, (cntHi << 8) | cntLo);
+    DEBUG_INFO("[GYRO] configureFifo readback: WHO_AM_I=0x%02X PWR=0x%02X (CLKSEL=%d) SMPL=0x%02X CFG=0x%02X (FIFO_MODE=%d) FIFO_EN=0x%02X USER=0x%02X FIFO_COUNT=%u",
+        who, pwr, (pwr & 0x07), smpl, cfg, (cfg & 0x40) ? 1 : 0, fifoEn, user, (cntHi << 8) | cntLo);
 
     // Also read raw output-register samples to confirm the sensor is producing
     // changing data (independent of the FIFO). Read gyro (0x43) five times,
