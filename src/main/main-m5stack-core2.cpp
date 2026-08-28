@@ -4318,7 +4318,7 @@ void loop() {
           connectedScreenIndex = Screens::Lens;
           break;
         case Screens::Lens:
-          connectedScreenIndex = Screens::Dashboard;
+          connectedScreenIndex = Screens::GyroLog;
           break;
       }
 
