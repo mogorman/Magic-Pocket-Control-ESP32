@@ -1663,14 +1663,18 @@ void Screen_Codec4K6K(bool forceRefresh = false)
 
   auto camera = BMDControlSystem::getInstance()->getCamera();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present (the screen is blanked
+  // below in that case anyway).
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   // Codec: BRAW and ProRes
 
   // If we have an up/down button press
   bool tappedAction = false;
-  if(btnAPressed || btnBPressed)
+  if((btnAPressed || btnBPressed) && camera->hasCodec())
   {
     DEBUG_DEBUG("Codec 4K/6K: Btn A/B pressed");
 
@@ -1880,8 +1884,11 @@ void Screen_CodecURSAMiniProG2(bool forceRefresh = false)
 
   auto camera = BMDControlSystem::getInstance()->getCamera();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   // Codec: BRAW and ProRes
 
@@ -2153,8 +2160,11 @@ void Screen_Resolution4K(bool forceRefresh = false)
   if(camera->hasRecordingFormat())
     currentRecordingFormat = camera->getRecordingFormat();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   bool tappedAction = false;
   if(btnAPressed || btnBPressed)
@@ -2503,8 +2513,11 @@ void Screen_Resolution6K(bool forceRefresh = false)
   if(camera->hasRecordingFormat())
     currentRecordingFormat = camera->getRecordingFormat();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   bool tappedAction = false;
   if(btnAPressed || btnBPressed)
@@ -2861,8 +2874,11 @@ void Screen_ResolutionURSAMiniProG2(bool forceRefresh = false)
   if(camera->hasRecordingFormat())
     currentRecordingFormat = camera->getRecordingFormat();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   bool tappedAction = false;
   if(btnAPressed || btnBPressed)
@@ -3151,8 +3167,11 @@ void Screen_Framerate4K(bool forceRefresh = false)
   if(camera->hasRecordingFormat())
     currentRecordingFormat = camera->getRecordingFormat();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   std::string currentFrameRate = currentRecordingFormat.frameRate_string();
 
@@ -3370,8 +3389,11 @@ void Screen_Framerate6K(bool forceRefresh = false)
   if(camera->hasRecordingFormat())
     currentRecordingFormat = camera->getRecordingFormat();
 
-  // Get the current Codec values
-  CodecInfo currentCodec = camera->getCodec();
+  // Get the current Codec values. getCodec() throws if the camera hasn't sent
+  // a codec yet, so only fetch it when one is present.
+  CodecInfo currentCodec(CCUPacketTypes::BasicCodec::BRAW, CCUPacketTypes::CodecVariants::kDefault);
+  if(camera->hasCodec())
+    currentCodec = camera->getCodec();
 
   std::string currentFrameRate = currentRecordingFormat.frameRate_string();
 
