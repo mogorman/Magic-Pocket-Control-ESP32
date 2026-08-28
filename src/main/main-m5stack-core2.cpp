@@ -4,6 +4,30 @@
 
 #define OUTPUT_CAMERA_SETTINGS 1  // 1 = Outputs camera settings through serial (so other applications can read them)
 
+// End-to-end self-test. Set GYRO_E2E_TEST to 1 to run it (default 0 = compiled
+// out for a clean production build). It boots into the real app, then drives
+// the production record path exactly as the record button would:
+//   1. after a short settle delay, queue a record START (gyroPendingStart ->
+//      the main loop calls gyroLog.begin(), which writes the hello-world file);
+//   2. after GYRO_E2E_DURATION_S seconds, queue a record STOP (gyroPendingEnd ->
+//      the main loop calls gyroLog.end(), which closes + commits the file);
+//   3. once end() has closed the file, read it back and verify it exists and is
+//      the expected size, then report a PASS/FAIL.
+// This exercises the full production SD path (begin/end/syncVolume) and checks
+// the resulting file is well-formed, without needing a camera connected.
+#ifndef GYRO_E2E_TEST
+#define GYRO_E2E_TEST 1
+#endif
+// How long (seconds) the E2E test records before stopping.
+#ifndef GYRO_E2E_DURATION_S
+#define GYRO_E2E_DURATION_S 10
+#endif
+// How long (ms) to wait after boot before the E2E test triggers the record
+// start, so the UI/SD code has a moment to settle.
+#ifndef GYRO_E2E_SETTLE_MS
+#define GYRO_E2E_SETTLE_MS 10000
+#endif
+
 // The output format is: >>[state]:[state value]
 // Here are some examples:
 /*
@@ -4076,12 +4100,97 @@ void setup() {
 int memoryLoopCounter;
 bool forceRecordOutline = false; // Show the recording outline as we haven't done it yet
 
+#if GYRO_E2E_TEST
+// The E2E test's state machine. It runs on the main loop (called from loop())
+// and only sets the same pending flags the real record button sets, so the
+// actual begin()/end() happen in the normal loop() code path.
+//   0 = waiting to start   1 = recording   2 = stopped, about to verify
+//   3 = done (reported)
+static int e2eState = 0;
+static uint32_t e2eStartMs = 0;    // millis() when the record start was queued
+static std::string e2eClipName;     // the clip name we started (to find the file)
+
+static void gyroE2ETestTick()
+{
+  switch(e2eState)
+  {
+    case 0:
+    {
+      // Wait for the settle delay, then queue a record start (exactly what the
+      // record button does: fill gyroPendingStart and set valid).
+      if(millis() >= GYRO_E2E_SETTLE_MS)
+      {
+        e2eClipName = nextGyroClipName();
+        gyroPendingStart.clipName = e2eClipName;
+        gyroPendingStart.ext = "braw";
+        gyroPendingStart.timecode = "00:00:00:00";
+        gyroPendingStart.valid = true;
+        e2eStartMs = millis();
+        e2eState = 1;
+        DEBUG_INFO("[GYRO-E2E] queued record START for '%s'", e2eClipName.c_str());
+      }
+      break;
+    }
+    case 1:
+    {
+      // Recording. After the target duration, queue a record stop.
+      if(millis() - e2eStartMs >= (uint32_t)GYRO_E2E_DURATION_S * 1000UL)
+      {
+        gyroPendingEnd = true;
+        e2eState = 2;
+        DEBUG_INFO("[GYRO-E2E] queued record STOP after %d s", GYRO_E2E_DURATION_S);
+      }
+      break;
+    }
+    case 2:
+    {
+      // The main loop has called end() (gyroLog is no longer recording). Read
+      // the file back and verify it exists and is the expected size.
+      if(!gyroLog.isRecording())
+      {
+        char path[128];
+        snprintf(path, sizeof(path), "/%s.txt", e2eClipName.c_str());
+
+        // The expected size is the exact byte count begin() wrote:
+        //   "hello world\n" + "clip: <name>\n"
+        // (matches writeHelloWorld()'s format string exactly).
+        size_t expectedSize = snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eClipName.c_str());
+
+        if(!gyroLog.fileExists(path))
+        {
+          DEBUG_ERROR("[GYRO-E2E] FAIL: '%s' was not created on the SD card", path);
+        }
+        else
+        {
+          uint64_t actual = gyroLog.fileSize(path);
+          bool ok = (actual == expectedSize);
+          DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes (expected %lu) -> %s",
+            path, (unsigned long)actual, (unsigned long)expectedSize, ok ? "PASS" : "FAIL");
+          if(!ok)
+            DEBUG_ERROR("[GYRO-E2E] FAIL: size %lu != expected %lu", (unsigned long)actual, (unsigned long)expectedSize);
+        }
+        e2eState = 3;
+      }
+      break;
+    }
+    case 3:
+    default:
+      // Done. Do nothing further; the normal UI continues.
+      break;
+  }
+}
+#endif // GYRO_E2E_TEST
+
 void loop() {
 
   static unsigned long lastConnectedTime = 0;
   const unsigned long reconnectInterval = 5000;  // 5 seconds (milliseconds)
 
   unsigned long currentTime = millis();
+
+#if GYRO_E2E_TEST
+  gyroE2ETestTick();
+#endif
 
   // ---- Gyro log: apply queued SD work on the main loop thread ----
   // The record start/stop callbacks (BLE notify thread) only set flags; the

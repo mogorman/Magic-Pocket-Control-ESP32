@@ -80,6 +80,13 @@ public:
     bool sdReady() const { return _sdReady; }
     const std::string& sdStatusMessage() const { return _sdStatusMessage; }
 
+    // Filesystem helpers (used by the E2E test to verify a written file).
+    // Returns true if a file exists at `path` (e.g. "/clip_0001.txt").
+    bool fileExists(const std::string& path) const;
+    // Returns the size in bytes of the file at `path`, or 0 if it can't be
+    // opened.
+    uint64_t fileSize(const std::string& path) const;
+
     // ---- Orientation (calibration) ----
     int getOrientationIndex() const { return _orientationIndex; }
     void setOrientationIndex(int index);
@@ -105,7 +112,7 @@ private:
     State _state = State::Idle;
     Summary _summary;
 
-    SdFat _sd;
+    mutable SdFat _sd;
     FatFile _file;
     bool _sdReady = false;
     std::string _sdStatusMessage = "not mounted yet";

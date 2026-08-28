@@ -229,3 +229,18 @@ void GyroLogWriter::loadOrientation()
 {
     // No persistence yet; keep the default (0 = "XYZ").
 }
+
+bool GyroLogWriter::fileExists(const std::string& path) const
+{
+    return _sd.exists(path.c_str());
+}
+
+uint64_t GyroLogWriter::fileSize(const std::string& path) const
+{
+    FatFile f;
+    if(!f.open(path.c_str(), O_RDONLY))
+        return 0;
+    uint64_t size = f.fileSize();
+    f.close();
+    return size;
+}
