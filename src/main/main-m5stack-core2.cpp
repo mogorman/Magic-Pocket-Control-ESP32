@@ -4256,6 +4256,20 @@ void loop() {
   // flags the real record button uses. Runs before the pending-flag handling
   // below so a start queued this iteration is processed in the same pass.
   gyroE2ETestTick();
+  // [DIAG] Heartbeat: prove the main loop keeps iterating during the recording
+  // (a hung loop would stop these). Prints every 5 s.
+  {
+    static uint32_t hbLast = 0;
+    static uint32_t hbCount = 0;
+    uint32_t now = millis();
+    if(hbLast == 0) hbLast = now;
+    if(now - hbLast >= 5000)
+    {
+      Serial.printf("[E2E-HB] loop alive, t=%lu ms, loops=%lu\n", (unsigned long)now, (unsigned long)hbCount);
+      hbLast = now;
+    }
+    hbCount++;
+  }
 #endif
 
   // Start a queued GCSV log here, on the main loop thread. The record-start
