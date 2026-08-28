@@ -420,6 +420,18 @@ float GyroLogWriter::measureFifoRate()
     int firstGx = 0, firstGy = 0, firstGz = 0;
     bool gotFirst = false;
 
+    // Duplicate detection: the FIFO is 1024 samples deep. If the sensor
+    // produces faster than we drain, it overflows and (depending on FIFO_MODE)
+    // either drops new samples or wraps. Either way, if we ever see the SAME
+    // 10-byte packet back-to-back, the data is not advancing -- we're reading
+    // stale/duplicated samples. Count consecutive identical packets.
+    uint8_t lastPkt[10] = {0};
+    bool haveLast = false;
+    uint32_t dupRuns = 0;      // number of times a packet == the previous one
+    uint32_t longestDupRun = 0;
+    uint32_t curDupRun = 0;
+    uint32_t changed = 0;      // number of packets that differed from the previous
+
     // A 10-byte packet: accel X/Y/Z, temp, gyro X/Y/Z (big-endian).
     uint8_t pkt[10];
 
@@ -440,9 +452,7 @@ float GyroLogWriter::measureFifoRate()
         if(count > maxCount)
             maxCount = count;
 
-        // Drain the FIFO. Read in 10-byte packets. (We read a little more than
-        // is present on the last one; the sensor wraps, but for a rate
-        // measurement over 3 s that's negligible.)
+        // Drain the FIFO. Read in 10-byte packets.
         uint16_t packetsToRead = count / 2; // 10-byte packets
         for(uint16_t i = 0; i < packetsToRead; i++)
         {
@@ -456,6 +466,25 @@ float GyroLogWriter::measureFifoRate()
                 firstGz = (int16_t)((pkt[8] << 8) | pkt[9]);
                 gotFirst = true;
             }
+
+            // Compare against the previous packet.
+            if(haveLast)
+            {
+                if(memcmp(pkt, lastPkt, 10) == 0)
+                {
+                    dupRuns++;
+                    curDupRun++;
+                    if(curDupRun > longestDupRun)
+                        longestDupRun = curDupRun;
+                }
+                else
+                {
+                    changed++;
+                    curDupRun = 0;
+                }
+            }
+            memcpy(lastPkt, pkt, 10);
+            haveLast = true;
         }
     }
 
@@ -466,6 +495,13 @@ float GyroLogWriter::measureFifoRate()
         (unsigned long)packets, (unsigned long)(elapsedUs / 1000), rate, (unsigned long)maxCount);
     if(gotFirst)
         DEBUG_INFO("[GYRO] FIFO first sample: gx=%d gy=%d gz=%d", firstGx, firstGy, firstGz);
+    DEBUG_INFO("[GYRO] FIFO dup check: %lu/%lu packets were IDENTICAL to the previous (longest run %lu), %lu changed",
+        (unsigned long)dupRuns, (unsigned long)packets, (unsigned long)longestDupRun, (unsigned long)changed);
+    if(packets > 0)
+    {
+        float dupPct = 100.0f * (float)dupRuns / (float)packets;
+        DEBUG_INFO("[GYRO] FIFO dup rate = %.1f%% of packets", dupPct);
+    }
 
     return rate;
 }
