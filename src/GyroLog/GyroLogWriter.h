@@ -123,6 +123,10 @@ public:
     // packets/second (the real FIFO sample rate) and a few sample values.
     // Returns the measured rate in Hz (0 on failure).
     float measureFifoRate();
+    // Measure the TRUE unique sensor rate independent of the FIFO: read the
+    // gyro output registers (0x43) on a 1 ms tick for ~3 s and count how often
+    // consecutive reads are identical. Returns the read rate in Hz.
+    float measureOutputRegisterRate();
     // Re-open the file at `path` read-only and verify its body is complete and
     // well-formed: it must contain exactly `expectedRows` data rows (each a
     // "t,gx,gy,gz,ax,ay,az" line), the final row's "t" index must equal

@@ -410,6 +410,63 @@ bool GyroLogWriter::configureFifo(int smplrtDiv)
     return true;
 }
 
+// Measure the TRUE unique sensor rate, independent of the FIFO: read the gyro
+// output registers (0x43, always the latest sample) on a 1 ms tick for ~3 s and
+// count how often consecutive reads are byte-identical. If the output registers
+// change every tick, the sensor is producing ~1 kHz of fresh data and the FIFO
+// duplicates we saw were a read-pattern artifact. If they also repeat ~59% of
+// the time, the sensor itself is only producing ~400 Hz of unique data.
+float GyroLogWriter::measureOutputRegisterRate()
+{
+    uint32_t t0 = micros();
+    uint32_t reads = 0;
+    uint32_t dups = 0;
+    uint8_t last[6] = {0};
+    bool haveLast = false;
+    uint32_t lastTick = millis();
+    int firstGx = 0, firstGy = 0, firstGz = 0;
+    bool gotFirst = false;
+
+    for(;;)
+    {
+        uint32_t now = micros();
+        if(now - t0 >= 3000000) // 3 s
+            break;
+
+        // One read per 1 ms tick (the cadence we'd use for a 1 kHz GCSV).
+        uint32_t tick = millis();
+        if(tick == lastTick)
+            continue;
+        lastTick = tick;
+
+        uint8_t g[6];
+        if(!M5.In_I2C.readRegister(kImuAddr, 0x43, g, 6, kImuI2cHz))
+            continue;
+        reads++;
+        if(!gotFirst)
+        {
+            firstGx = (int16_t)((g[0] << 8) | g[1]);
+            firstGy = (int16_t)((g[2] << 8) | g[3]);
+            firstGz = (int16_t)((g[4] << 8) | g[5]);
+            gotFirst = true;
+        }
+        if(haveLast && memcmp(g, last, 6) == 0)
+            dups++;
+        memcpy(last, g, 6);
+        haveLast = true;
+    }
+
+    uint32_t elapsedUs = micros() - t0;
+    float rate = (float)reads / ((float)elapsedUs / 1000000.0f);
+    DEBUG_INFO("[GYRO] outreg rate: %lu reads in %lu ms = %.1f Hz; %lu/%lu identical to previous (%.1f%%)",
+        (unsigned long)reads, (unsigned long)(elapsedUs / 1000), rate,
+        (unsigned long)dups, (unsigned long)reads,
+        reads ? (100.0f * (float)dups / (float)reads) : 0.0f);
+    if(gotFirst)
+        DEBUG_INFO("[GYRO] outreg first sample: gx=%d gy=%d gz=%d", firstGx, firstGy, firstGz);
+    return rate;
+}
+
 float GyroLogWriter::measureFifoRate()
 {
     // The FIFO holds up to 1024 samples. If the sensor's native rate is ~3.8
