@@ -401,7 +401,7 @@ private:
     // (400k-1.5M) showed 1.5 MHz gives the best capture with the fewest I2C read
     // failures on this clone, so that's the default. (If a different board's
     // sensor misbehaves at 1.5 MHz, drop this back to 1000000 or 400000.)
-    static const uint32_t kImuI2cHz = 600000;
+    static const uint32_t kImuI2cHz = 1000000;
     // The I2C clock actually used for the FIFO drain. Defaults to kImuI2cHz; the
     // E2E test can override it via setI2cHz() to sweep for the best value.
     uint32_t _i2cHz = kImuI2cHz;
