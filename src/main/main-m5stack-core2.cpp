@@ -4102,29 +4102,46 @@ bool forceRecordOutline = false; // Show the recording outline as we haven't don
 
 #if GYRO_E2E_TEST
 // The E2E test's state machine. It runs on the main loop (called from loop())
-// and only sets the same pending flags the real record button sets, so the
-// actual begin()/end() happen in the normal loop() code path.
-//   0 = waiting to start   1 = recording   2 = stopped, about to verify
-//   3 = done (reported)
+// and drives the REAL camera record path, so it is a true end-to-end test:
+//   0 = waiting to start (settle delay)
+//   1 = recording: we sent the camera a real Record command and gyroLog.begin()
+//       created the hello-world file. After GYRO_E2E_DURATION_S we send the
+//       camera a real Preview (stop) command and set gyroPendingEnd (-> end()).
+//   2 = waiting for the playback clip-name capture to rename the file to the
+//       real clip name (the camera reports it after we flip it to playback).
+//   3 = verify: read the (renamed) file back and check it exists + correct size.
+//   4 = done (reported)
 static int e2eState = 0;
-static uint32_t e2eStartMs = 0;    // millis() when the record start was queued
-static std::string e2eClipName;     // the clip name we started (to find the file)
+static uint32_t e2eStartMs = 0;     // millis() when the record start was sent
+static uint32_t e2eStopMs = 0;      // millis() when the record stop was sent
+static std::string e2eClipName;      // the generic name we started the file with
+static std::string e2eRealName;     // the real clip name the camera reported
 
 static void gyroE2ETestTick()
 {
+  auto cam = BMDControlSystem::getInstance()->getCamera();
+  bool connected = (cameraConnection.status == BMDCameraConnection::ConnectionStatus::Connected);
+
   switch(e2eState)
   {
     case 0:
     {
-      // Wait for the settle delay, then queue a record start (exactly what the
-      // record button does: fill gyroPendingStart and set valid).
-      if(millis() >= GYRO_E2E_SETTLE_MS)
+      // Wait for the settle delay AND a connected camera with a transport mode
+      // (we need to send it a real Record command). The camera connects a few
+      // seconds after boot, so gate on that rather than a fixed delay alone.
+      if(millis() >= GYRO_E2E_SETTLE_MS && connected && cam && cam->hasTransportMode())
       {
         e2eClipName = nextGyroClipName();
         gyroPendingStart.clipName = e2eClipName;
         gyroPendingStart.ext = "braw";
         gyroPendingStart.timecode = "00:00:00:00";
         gyroPendingStart.valid = true;
+
+        TransportInfo ti = cam->getTransportMode();
+        ti.mode = CCUPacketTypes::MediaTransportMode::Record;
+        DEBUG_INFO("[GYRO-E2E] sending camera RECORD command");
+        PacketWriter::writeTransportInfo(ti, &cameraConnection);
+
         e2eStartMs = millis();
         e2eState = 1;
         DEBUG_INFO("[GYRO-E2E] queued record START for '%s'", e2eClipName.c_str());
@@ -4133,10 +4150,25 @@ static void gyroE2ETestTick()
     }
     case 1:
     {
-      // Recording. After the target duration, queue a record stop.
+      // Recording. After the target duration, send the camera a real PREVIEW
+      // (stop) command and queue the gyro-log stop (-> end() closes the file).
       if(millis() - e2eStartMs >= (uint32_t)GYRO_E2E_DURATION_S * 1000UL)
       {
+        if(connected && cam && cam->hasTransportMode())
+        {
+          TransportInfo ti = cam->getTransportMode();
+          ti.mode = CCUPacketTypes::MediaTransportMode::Preview;
+          DEBUG_INFO("[GYRO-E2E] sending camera PREVIEW (stop) command");
+          PacketWriter::writeTransportInfo(ti, &cameraConnection);
+        }
+        else
+        {
+          DEBUG_ERROR("[GYRO-E2E] not connected / no transport mode; cannot send PREVIEW");
+        }
+
+        gyroLog.setTimecodeAtEnd("00:00:00:00");
         gyroPendingEnd = true;
+        e2eStopMs = millis();
         e2eState = 2;
         DEBUG_INFO("[GYRO-E2E] queued record STOP after %d s", GYRO_E2E_DURATION_S);
       }
@@ -4144,36 +4176,56 @@ static void gyroE2ETestTick()
     }
     case 2:
     {
-      // The main loop has called end() (gyroLog is no longer recording). Read
-      // the file back and verify it exists and is the expected size.
+      // end() has closed the file (gyroLog no longer recording). Now wait for the
+      // playback clip-name capture to rename the file to the real clip name.
       if(!gyroLog.isRecording())
       {
-        char path[128];
-        snprintf(path, sizeof(path), "/%s.txt", e2eClipName.c_str());
-
-        // The expected size is the exact byte count begin() wrote:
-        //   "hello world\n" + "clip: <name>\n"
-        // (matches writeHelloWorld()'s format string exactly).
-        size_t expectedSize = snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eClipName.c_str());
-
-        if(!gyroLog.fileExists(path))
+        if(gyroPendingSlateNameValid)
         {
-          DEBUG_ERROR("[GYRO-E2E] FAIL: '%s' was not created on the SD card", path);
+          // The real clip name arrived; the main loop will apply it (rename).
+          e2eRealName = gyroPendingSlateName;
+          e2eState = 3;
+          DEBUG_INFO("[GYRO-E2E] got real clip name '%s'; verifying renamed file", e2eRealName.c_str());
         }
-        else
+        else if(millis() - e2eStopMs > 8000)
         {
-          uint64_t actual = gyroLog.fileSize(path);
-          bool ok = (actual == expectedSize);
-          DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes (expected %lu) -> %s",
-            path, (unsigned long)actual, (unsigned long)expectedSize, ok ? "PASS" : "FAIL");
-          if(!ok)
-            DEBUG_ERROR("[GYRO-E2E] FAIL: size %lu != expected %lu", (unsigned long)actual, (unsigned long)expectedSize);
+          // No clip name within 8s (e.g. camera didn't report one). Verify the
+          // file under its original generic name instead.
+          e2eRealName = e2eClipName;
+          e2eState = 3;
+          DEBUG_INFO("[GYRO-E2E] no clip name after 8s; verifying original name '%s'", e2eClipName.c_str());
         }
-        e2eState = 3;
       }
       break;
     }
     case 3:
+    {
+      // Verify the file (renamed to the real clip name, or the original name if
+      // no clip name arrived) exists and is the expected size.
+      char path[128];
+      snprintf(path, sizeof(path), "/%s.txt", e2eRealName.c_str());
+
+      // The expected size is the exact byte count written for the REAL name
+      // (writeHelloWorld rewrites the file with the real clip name on rename).
+      size_t expectedSize = snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eRealName.c_str());
+
+      if(!gyroLog.fileExists(path))
+      {
+        DEBUG_ERROR("[GYRO-E2E] FAIL: '%s' was not found on the SD card", path);
+      }
+      else
+      {
+        uint64_t actual = gyroLog.fileSize(path);
+        bool ok = (actual == expectedSize);
+        DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes (expected %lu) -> %s",
+          path, (unsigned long)actual, (unsigned long)expectedSize, ok ? "PASS" : "FAIL");
+        if(!ok)
+          DEBUG_ERROR("[GYRO-E2E] FAIL: size %lu != expected %lu", (unsigned long)actual, (unsigned long)expectedSize);
+      }
+      e2eState = 4;
+      break;
+    }
+    case 4:
     default:
       // Done. Do nothing further; the normal UI continues.
       break;
