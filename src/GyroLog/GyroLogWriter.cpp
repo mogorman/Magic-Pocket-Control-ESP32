@@ -159,9 +159,11 @@ bool GyroLogWriter::end()
     // Report total and free space on the card for the screen. Total comes from
     // the FAT boot sector (cluster count x bytes-per-cluster) -- cheap. Free
     // space comes from freeClusterCount(); on a FAT32 card that walks the whole
-    // FAT, so we time it and report how long it took (the original branch
-    // avoided it because it hung ~99s, but that was with the full GCSV writer
-    // load -- measure it here for the lightweight text-file path).
+    // FAT once (it's cached afterwards), so we time it and log how long it took.
+    // The original branch avoided it because it hung ~99s under the full GCSV
+    // writer load; here we measure it on the lightweight text-file path and keep
+    // a generous 10s cap as a safety net (we can't preempt a blocking call, but
+    // this keeps a pathological card from stalling the UI indefinitely).
     if(_sd.fatType() != 0)
     {
         uint32_t bpc = _sd.bytesPerCluster();

@@ -220,6 +220,13 @@ static GyroPendingStart gyroPendingStart;
 // notify thread while the main loop may be touching the same card).
 static bool gyroPendingEnd = false;
 
+// Set synchronously in the record-start callback the moment a start is queued,
+// and cleared by the main loop once begin() has run (or failed). The camera can
+// push the record state twice in a row before the main loop has processed the
+// first, so this flag (set on the notify thread, not the main loop) is what
+// de-duplicates a spurious second start.
+static bool gyroStartArmed = false;
+
 // The codec in effect when the clip started, so we can build the right video
 // file extension once we have the real clip name.
 static CCUPacketTypes::BasicCodec gyroStartCodec = CCUPacketTypes::BasicCodec::BRAW;
@@ -4162,7 +4169,10 @@ static void gyroE2ETestTick()
     case 1:
     {
       // Recording. After the target duration, send the camera a real PREVIEW
-      // (stop) command and queue the gyro-log stop (-> end() closes the file).
+      // (stop) command. We do NOT set gyroPendingEnd here: the camera's own
+      // record-stop callback (fired by the PREVIEW command) sets it and starts
+      // the playback clip-name capture, exactly as it would for a real user.
+      // Driving the real callbacks keeps this a true end-to-end test.
       if(millis() - e2eStartMs >= (uint32_t)GYRO_E2E_DURATION_S * 1000UL)
       {
         if(connected && cam && cam->hasTransportMode())
@@ -4177,17 +4187,16 @@ static void gyroE2ETestTick()
           DEBUG_ERROR("[GYRO-E2E] not connected / no transport mode; cannot send PREVIEW");
         }
 
-        gyroLog.setTimecodeAtEnd("00:00:00:00");
-        gyroPendingEnd = true;
         e2eStopMs = millis();
         e2eState = 2;
-        DEBUG_INFO("[GYRO-E2E] queued record STOP after %d s", GYRO_E2E_DURATION_S);
+        DEBUG_INFO("[GYRO-E2E] sent STOP after %d s; waiting for camera stop callback", GYRO_E2E_DURATION_S);
       }
       break;
     }
     case 2:
     {
-      // end() has closed the file (gyroLog no longer recording). Now wait for the
+      // Wait for the camera's record-stop callback to have run end() (the file
+      // is closed once gyroLog is no longer recording), then wait for the
       // playback clip-name capture to rename the file to the real clip name.
       if(!gyroLog.isRecording())
       {
@@ -4198,13 +4207,13 @@ static void gyroE2ETestTick()
           e2eState = 3;
           DEBUG_INFO("[GYRO-E2E] got real clip name '%s'; verifying renamed file", e2eRealName.c_str());
         }
-        else if(millis() - e2eStopMs > 8000)
+        else if(millis() - e2eStopMs > 10000)
         {
-          // No clip name within 8s (e.g. camera didn't report one). Verify the
+          // No clip name within 10s (e.g. camera didn't report one). Verify the
           // file under its original generic name instead.
           e2eRealName = e2eClipName;
           e2eState = 3;
-          DEBUG_INFO("[GYRO-E2E] no clip name after 8s; verifying original name '%s'", e2eClipName.c_str());
+          DEBUG_INFO("[GYRO-E2E] no clip name after 10s; verifying original name '%s'", e2eClipName.c_str());
         }
       }
       break;
@@ -4264,6 +4273,7 @@ void loop() {
   if(gyroPendingStart.valid)
   {
     gyroPendingStart.valid = false;
+    gyroStartArmed = false; // clear the de-dup flag now that the start is handled
     if(gyroLog.begin(gyroPendingStart.clipName, gyroPendingStart.ext, gyroPendingStart.timecode))
       DEBUG_INFO("[GYRO] started log '%s'", gyroPendingStart.clipName.c_str());
     else
@@ -4341,6 +4351,20 @@ void loop() {
         if(recording)
         {
           // ---- RECORD START ----
+          // The camera can push the record state more than once in a row (e.g. a
+          // repeated "record" notify right after we command it). Ignore any
+          // start that arrives while one is already armed/active, so we never
+          // start a second, spurious log (which would fail on the busy SD and
+          // corrupt the start/stop state machine). gyroStartArmed is set
+          // synchronously here (on the notify thread), so it catches a 2nd start
+          // that arrives before the main loop has processed the first.
+          if(gyroStartArmed || gyroLog.isRecording() || gyroPendingStart.valid)
+          {
+            DEBUG_INFO("[GYRO] ignoring duplicate record START (already armed/recording/queued)");
+            return;
+          }
+          gyroStartArmed = true;
+
           // Remember the codec so we can build the right file extension later.
           if(cam->hasCodec())
             gyroStartCodec = cam->getCodec().basicCodec;
