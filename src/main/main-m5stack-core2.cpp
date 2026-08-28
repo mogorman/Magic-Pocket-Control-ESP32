@@ -4250,22 +4250,12 @@ static void gyroE2ETestTick()
     case 3:
     {
       // Verify the file (renamed to the real clip name, or the original name if
-      // no clip name arrived) exists, has the expected size, and is complete.
+      // no clip name arrived) exists, has a sensible size, and a clean "t"
+      // timeline (dense 1 kHz samples, no big gaps, no backwards steps).
       char path[128];
-      snprintf(path, sizeof(path), "/%s.txt", e2eRealName.c_str());
+      snprintf(path, sizeof(path), "/%s.gcsv", e2eRealName.c_str());
 
       const GyroLogWriter::Summary& s = gyroLog.getSummary();
-
-      // Expected size = header + (rows * 19). In mock mode the row width is a
-      // fixed 19 bytes, so this is exact. (In non-mock mode the file is the
-      // "hello world" payload, so we fall back to the old size check.)
-#if GYRO_MOCK_DATA
-      uint64_t expectedSize = (uint64_t)s.mockHeaderBytes + (uint64_t)s.mockRows * 19;
-      DEBUG_INFO("[GYRO-E2E] expected size: %lu-byte header + %lu rows * 19 = %lu bytes",
-        (unsigned long)s.mockHeaderBytes, (unsigned long)s.mockRows, (unsigned long)expectedSize);
-#else
-      uint64_t expectedSize = (uint64_t)snprintf(nullptr, 0, "hello world\nclip: %s\n", e2eRealName.c_str());
-#endif
 
       if(!gyroLog.fileExists(path))
       {
@@ -4274,22 +4264,31 @@ static void gyroE2ETestTick()
       else
       {
         uint64_t actual = gyroLog.fileSize(path);
-        bool sizeOk = (actual == expectedSize);
-        DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes (expected %lu) -> %s",
-          path, (unsigned long)actual, (unsigned long)expectedSize, sizeOk ? "PASS" : "FAIL");
-        if(!sizeOk)
-          DEBUG_ERROR("[GYRO-E2E] FAIL: size %lu != expected %lu", (unsigned long)actual, (unsigned long)expectedSize);
+        long rows = gyroLog.countSamplesInFile(path);
+        DEBUG_INFO("[GYRO-E2E] '%s' size=%lu bytes, %ld data rows, summary duration=%lu ms, i2cFailures=%lu",
+          path, (unsigned long)actual, (long)rows, (unsigned long)s.durationMs, (unsigned long)gyroLog.i2cFailures());
 
-#if GYRO_MOCK_DATA
-        // Also confirm the file was written *completely*: re-read it and check
-        // the row count and that the last "t" index is rows-1 (no dropped rows).
-        bool complete = gyroLog.verifyFileComplete(path, s.mockRows);
-        if(!complete)
-          DEBUG_ERROR("[GYRO-E2E] FAIL: file body is not complete/well-formed");
+        // The expected row count is ~ (clip duration in ms) since we sample at
+        // 1 kHz. The clip duration is s.durationMs (samples * tscale). We accept
+        // the file if it has a healthy number of rows and a clean timeline.
+        // (The exact count can't be known a priori, so we check the timeline
+        // health via analyzeTIndex and that the row count is in the right ballpark.)
+        if(rows <= 0)
+          DEBUG_ERROR("[GYRO-E2E] FAIL: no data rows found in '%s'", path);
         else
-          DEBUG_INFO("[GYRO-E2E] file body complete (all %lu rows present, ends with newline)",
-            (unsigned long)s.mockRows);
-#endif
+        {
+          // Check the timeline is dense/monotonic (maxGap <= 1, no backwards).
+          gyroLog.analyzeTIndex(path);
+          // A 1 kHz sampler over a clip of ~durationMs should produce ~durationMs
+          // rows. Flag if we're far off (a big shortfall means samples were lost).
+          uint32_t expected = s.durationMs; // ~1 row per ms
+          if(expected > 0 && rows < (long)(expected * 0.8))
+            DEBUG_ERROR("[GYRO-E2E] FAIL: only %ld rows for ~%lu ms clip (expected ~%lu); samples likely lost",
+              (long)rows, (unsigned long)expected, (unsigned long)expected);
+          else
+            DEBUG_INFO("[GYRO-E2E] row count %ld is in the expected range for a ~%lu ms clip",
+              (long)rows, (unsigned long)expected);
+        }
       }
       e2eState = 4;
       break;
@@ -4329,10 +4328,9 @@ void loop() {
       DEBUG_INFO("[GYRO] failed to start log '%s' (SD not ready?)", gyroPendingStart.clipName.c_str());
   }
 
-  // While recording, append one sample's worth of data per ~1 ms tick. (With
-  // GYRO_MOCK_DATA this is the mock GCSV row writer; later it becomes the real
-  // 1 kHz IMU sampler.) Called every loop() iteration so the row rate tracks the
-  // real sampler even though the loop cadence is irregular.
+  // No-op hook: the dedicated sampler task (started in begin()) does all the
+  // 1 kHz IMU sampling on its own FreeRTOS task, so nothing to do here on the
+  // main loop. Kept so the call site stays simple.
   gyroLog.poll();
 
   // Finalise a just-stopped log (close file + commit to card).
