@@ -112,6 +112,17 @@ public:
     // Returns the size in bytes of the file at `path`, or 0 if it can't be
     // opened.
     uint64_t fileSize(const std::string& path) const;
+
+    // ---- MPU6886 FIFO self-test ----
+    // Configure the sensor's FIFO (gyro+accel, 10-byte packets) at the given
+    // output-data-rate divider (0 = no divider = the sensor's native rate).
+    // Returns true if the FIFO was enabled.
+    bool configureFifo(int smplrtDiv);
+    // For ~3 seconds, repeatedly read the FIFO count register and drain the
+    // FIFO, counting how many 10-byte packets arrive. Logs the measured
+    // packets/second (the real FIFO sample rate) and a few sample values.
+    // Returns the measured rate in Hz (0 on failure).
+    float measureFifoRate();
     // Re-open the file at `path` read-only and verify its body is complete and
     // well-formed: it must contain exactly `expectedRows` data rows (each a
     // "t,gx,gy,gz,ax,ay,az" line), the final row's "t" index must equal

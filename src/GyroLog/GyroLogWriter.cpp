@@ -344,6 +344,101 @@ uint64_t GyroLogWriter::fileSize(const std::string& path) const
     return size;
 }
 
+// ---- MPU6886 FIFO self-test ----
+// The MPU6886 sits at I2C address 0x68 on the Core2's internal I2C bus
+// (M5.In_I2C), which M5Unified already initialised. We talk to it directly at
+// 400 kHz (the same rate the original branch used).
+static const uint8_t kImuAddr = 0x68;
+static const uint32_t kImuI2cHz = 400000;
+
+bool GyroLogWriter::configureFifo(int smplrtDiv)
+{
+    // Wake the sensor and select the PLL gyro-X clock (PWR_MGMT_1 = 0x40:
+    // bit6 = PLL gyro X, SLEEP clear) for stable timing.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x40, kImuI2cHz);
+    delay(10); // let the PLL lock
+
+    // Sample-rate divider. 0 = no divider = the sensor's native rate.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x19, (uint8_t)smplrtDiv, kImuI2cHz);
+
+    // DLPF. CONFIG = 0x01 (44 Hz DLPF) is the highest setting where the sample
+    // rate divider still works; keep it as M5Unified set it.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x01, kImuI2cHz);
+
+    // Enable the FIFO for gyro + accel (10 bytes per packet).
+    M5.In_I2C.writeRegister8(kImuAddr, 0x23, 0x08, kImuI2cHz); // FIFO_EN: GYRO|ACCEL
+
+    // USER_CTRL: FIFO_EN (bit6) + FIFO_RST (bit5) to enable and clear the FIFO.
+    M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x40, kImuI2cHz);
+    delay(10);
+
+    DEBUG_INFO("[GYRO] configureFifo: FIFO enabled (gyro+accel), SMPLRT_DIV=%d", smplrtDiv);
+    return true;
+}
+
+float GyroLogWriter::measureFifoRate()
+{
+    // The FIFO holds up to 1024 samples. If the sensor's native rate is ~3.8
+    // kHz, the FIFO fills in ~270 ms and overflows (new samples are dropped).
+    // We drain it as fast as the I2C bus allows and count packets, so the
+    // measured rate reflects what the bus can actually sustain.
+
+    uint32_t t0 = micros();
+    uint32_t packets = 0;
+    uint32_t maxCount = 0;
+    int firstGx = 0, firstGy = 0, firstGz = 0;
+    bool gotFirst = false;
+
+    // A 10-byte packet: accel X/Y/Z, temp, gyro X/Y/Z (big-endian).
+    uint8_t pkt[10];
+
+    for(;;)
+    {
+        uint32_t now = micros();
+        if(now - t0 >= 3000000) // 3 s
+            break;
+
+        // Read the FIFO count (upper 9 bits, in 2-byte units) from 0x72:0x73.
+        uint8_t ch = M5.In_I2C.readRegister8(kImuAddr, 0x72, kImuI2cHz);
+        uint8_t cl = M5.In_I2C.readRegister8(kImuAddr, 0x73, kImuI2cHz);
+        uint16_t count = ((uint16_t)ch << 8) | cl; // number of 2-byte units
+
+        if(count == 0)
+            continue;
+
+        if(count > maxCount)
+            maxCount = count;
+
+        // Drain the FIFO. Read in 10-byte packets. (We read a little more than
+        // is present on the last one; the sensor wraps, but for a rate
+        // measurement over 3 s that's negligible.)
+        uint16_t packetsToRead = count / 2; // 10-byte packets
+        for(uint16_t i = 0; i < packetsToRead; i++)
+        {
+            if(!M5.In_I2C.readRegister(kImuAddr, 0x3B, pkt, 10, kImuI2cHz))
+                break;
+            packets++;
+            if(!gotFirst)
+            {
+                firstGx = (int16_t)((pkt[4] << 8) | pkt[5]);
+                firstGy = (int16_t)((pkt[6] << 8) | pkt[7]);
+                firstGz = (int16_t)((pkt[8] << 8) | pkt[9]);
+                gotFirst = true;
+            }
+        }
+    }
+
+    uint32_t elapsedUs = micros() - t0;
+    float rate = (float)packets / ((float)elapsedUs / 1000000.0f);
+
+    DEBUG_INFO("[GYRO] FIFO rate: %lu packets in %lu ms = %.1f Hz (max FIFO count seen: %lu 2-byte units)",
+        (unsigned long)packets, (unsigned long)(elapsedUs / 1000), rate, (unsigned long)maxCount);
+    if(gotFirst)
+        DEBUG_INFO("[GYRO] FIFO first sample: gx=%d gy=%d gz=%d", firstGx, firstGy, firstGz);
+
+    return rate;
+}
+
 #if GYRO_MOCK_DATA
 // Write the GCSV header block to the already-open data file. The header is a
 // fixed set of "key,value" lines (the GYROFLOW IMU LOG format). The "note" and

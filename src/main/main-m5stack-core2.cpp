@@ -28,6 +28,13 @@
 #define GYRO_E2E_SETTLE_MS 3000
 #endif
 
+// FIFO self-test. Set to 1 to run a one-shot MPU6886 FIFO rate measurement at
+// boot (enables the gyro+accel FIFO, drains it for ~3 s, and logs the measured
+// packets/second). Default 0 = compiled out.
+#ifndef GYRO_FIFO_TEST
+#define GYRO_FIFO_TEST 0
+#endif
+
 // The output format is: >>[state]:[state value]
 // Here are some examples:
 /*
@@ -4057,6 +4064,16 @@ void setup() {
   M5.begin();
 
   setImu1kHz();
+
+#if GYRO_FIFO_TEST
+  // One-shot FIFO rate self-test: enable the gyro+accel FIFO and measure how
+  // many packets/second the I2C bus can actually drain. Runs before the camera
+  // connection so it doesn't interfere with the E2E test.
+  DEBUG_INFO("[GYRO-FIFO] running FIFO rate self-test...");
+  gyroLog.configureFifo(0); // SMPLRT_DIV = 0 (sensor's native rate)
+  float fifoRate = gyroLog.measureFifoRate();
+  DEBUG_INFO("[GYRO-FIFO] measured FIFO rate = %.1f Hz", fifoRate);
+#endif
 
   tft.setColorDepth(16);
   tft.setSwapBytes(true);
