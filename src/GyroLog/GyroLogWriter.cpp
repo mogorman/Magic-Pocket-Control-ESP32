@@ -1048,14 +1048,20 @@ void GyroLogWriter::startWriterTask()
         return; // already running
     _writerStop = false;
     // 8 KB stack: the task only does a FatFile::write of a few KB, so this is
-    // ample. Pinned to core 0 so its long card writes (up to ~200 ms) run on the
-    // other core and never starve the 1 kHz sampler, which runs on the loop
-    // task (core 1 on the ESP32). Priority 2 so the writer is not starved by the
-    // sampler. Note: the ESP32 Arduino framework's xTaskCreatePinnedToCore puts
-    // the TaskHandle_t* BEFORE the core ID (unlike raw FreeRTOS), so the order
-    // is (func, name, stack, params, priority, &handle, coreID).
+    // ample. Pinned to CORE 0 at priority 6 (ABOVE the sampler's 5).
+    //
+    // Why priority 6 (above the sampler): the sampler's 1 ms spin-wait is a tight
+    // loop that only yields to same-or-HIGHER priority tasks (portYIELD). The
+    // writer used to be at priority 2 (below the sampler), so the sampler's tight
+    // loop never let the writer run -- the ring filled, the writer starved, and
+    // the _ringMutex/_dataSem bookkeeping tripped a FreeRTOS mutex-ownership
+    // assert. At priority 6 the writer PREEMPTS the sampler whenever it has a
+    // batch to flush (woken by _dataSem), does its few-ms SD write, and the
+    // sampler resumes and re-locks to the 1 ms grid (the spin-wait waits to the
+    // next boundary). The writer only runs every ~100 ms for a few ms, so the
+    // preemptions are brief and the grid stays dense.
     xTaskCreatePinnedToCore(&GyroLogWriter::writerTaskTrampoline, "gyroWriter", 8192,
-        this, 2, &_writerTask, 0);
+        this, 6, &_writerTask, 0);
 }
 
 void GyroLogWriter::stopWriterTask()
