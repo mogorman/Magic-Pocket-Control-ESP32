@@ -4183,6 +4183,14 @@ void setup() {
   // Earliest-possible I2C probe, before ANY peripheral object is constructed,
   // to rule out the QSPI display / other objects perturbing the SDA/SCL GPIOs.
   {
+    // Raw GPIO test: can we drive SDA(15)/SCL(14) at all? If these read back
+    // as controllable, the GPIOs are alive and the I2C *slaves* are the problem.
+    pinMode(IIC_SDA, OUTPUT); pinMode(IIC_SCL, OUTPUT);
+    digitalWrite(IIC_SDA, HIGH); digitalWrite(IIC_SCL, HIGH);
+    pinMode(IIC_SDA, INPUT_PULLUP); pinMode(IIC_SCL, INPUT_PULLUP);
+    delay(10);
+    Serial.printf("GPIO SDA(15)=%d SCL(14)=%d (expect 1,1 with pull-ups)\n",
+                  digitalRead(IIC_SDA), digitalRead(IIC_SCL));
     Wire.begin(IIC_SDA, IIC_SCL);
     delay(200);
     Serial.print("EARLY I2C scan:");
