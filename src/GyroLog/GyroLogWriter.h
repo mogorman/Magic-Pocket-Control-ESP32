@@ -86,14 +86,14 @@ private:
 // recorded on the connected Blackmagic camera, and writes a sidecar
 // "<clipname>.gcsv" file to the microSD card.
 //
-// The IMU runs at 1 kHz. The QMI8658's hardware FIFO (Stream mode) buffers every
-// sample the sensor produces; a dedicated sampler task drains that FIFO in
-// batches (every ~20 ms, or when the FIFO watermark is hit) via a single I2C
-// burst read, and appends one dense GCSV row per sample to a PSRAM ring buffer.
-// A second (writer) task commits the ring to the card in batches, so a slow
-// (multi-ms) SD write never stalls sampling. Because the sensor's own FIFO holds
-// the samples between drains, a slow I2C read neither loses nor repeats a sample.
-// The "tscale" field is 1 ms, so Gyroflow's timeline is dense and accurate.
+// The IMU is sampled at 1 kHz: a dedicated sampler task reads the QMI8658's
+// output registers once per 1 ms tick (pinned to the real-time grid) via a single
+// 12-byte I2C burst read (accel+gyro are contiguous), and appends one dense row to
+// a PSRAM ring buffer; a second (writer) task commits the ring to the card in
+// batches, so a slow (multi-ms) SD write never stalls the 1 kHz sampling. The
+// single burst read keeps the I2C time (~200 us) well under the 1 ms period, so we
+// don't re-read the same sample on consecutive ticks. The "tscale" field is 1 ms,
+// so Gyroflow's timeline is dense and accurate.
 //
 //   * begin(clipName, ...)  -> on record start: open the GCSV file, write the
 //                              header, and start the sampler + writer tasks.
@@ -248,21 +248,19 @@ private:
     void closeFile();
 
     // Configure the QMI8658 for 1 kHz sampling: enable the gyro at 1024 dps and
-    // the accelerometer at 8 g (both at their highest ODR), then set up the
-    // hardware FIFO in Stream mode (128-sample depth, watermark 32). The FIFO is
-    // what the sampler task drains: the sensor buffers every 1 kHz sample itself,
-    // so a slow I2C read never loses or repeats a sample. After configuring we
-    // let the sensor settle (~100 ms, so the gyro's digital filter is warm) and
-    // reset the FIFO, so the first logged sample is already good (no zeroed start).
+    // the accelerometer at 8 g (both at their highest ODR). After configuring we
+    // let the sensor settle ~100 ms (so the gyro's digital filter is warm) before
+    // the sampler starts, so the first logged sample is already good (no zeroed
+    // start). The sampler then reads the output registers at 1 kHz.
     void configurePolling();
 
-    // Drain the QMI8658 FIFO: read its status/count, burst-read all buffered
-    // samples in one I2C transaction, parse each 12-byte sample (accel then gyro,
-    // raw int16) into one dense GCSV row each, and append them to the ring.
-    // Returns the number of rows appended (0 if the FIFO was empty). Used by the
-    // sampler task, which calls it on a ~20 ms cadence (or when the watermark is
-    // hit) rather than every 1 ms -- the FIFO holds the samples in the meantime.
-    uint32_t drainFifo();
+    // Read one fresh gyro+accel sample from the QMI8658's output registers (a
+    // single 12-byte I2C burst of the contiguous accel+gyro registers) and append
+    // one dense GCSV row to the ring, waking the writer. Returns the number of
+    // rows appended (0 or 1). Used by the sampler task, which calls it once per
+    // 1 ms tick. The single burst read keeps the I2C time (~200 us) well under
+    // the 1 ms period so we don't re-read the same sample on consecutive ticks.
+    uint32_t pollOutputRegisters();
 
     // Drain as much of the ring as possible to the file. Runs on the writer task
     // (and once from end() to flush the tail). Uses a two-phase copy (fast
@@ -277,13 +275,11 @@ private:
     void startWriterTask();
     void stopWriterTask();
 
-    // The sampler task's main loop: on a ~20 ms cadence (or when the FIFO
-    // watermark is hit) it drains the QMI8658 FIFO -- burst-reading every sample
-    // the sensor has buffered since the last drain -- and appends one dense GCSV
-    // row per sample to the ring, waking the writer. Because the sensor's own FIFO
-    // holds the samples between drains, a slow I2C read neither loses nor repeats
-    // a sample (the old 1 ms output-register poll re-read the same sample when the
-    // read latency exceeded the 1 ms period). Runs on its own FreeRTOS task.
+    // The sampler task's main loop: read the QMI8658 output registers once per
+    // 1 ms tick (pinned to the real-time grid) via a single 12-byte I2C burst, and
+    // append one dense GCSV row to the ring, waking the writer. The single burst
+    // read keeps the I2C time well under the 1 ms period so we don't re-read the
+    // same sample on consecutive ticks. Runs on its own FreeRTOS task.
     static void samplerTaskTrampoline(void* param);
     void samplerTask();
     void startSamplerTask();
@@ -362,47 +358,9 @@ private:
 
     // The QMI8658 driver instance. It is created once (in configurePolling) and
     // reused for every recording; it does the one-time chip reset + sensor config.
-    // The FIFO *reads* are done via raw Wire (see drainFifo) because the driver's
-    // raw FIFO read is private.
+    // The sampler reads the output registers via a single raw-Wire 12-byte burst
+    // (see pollOutputRegisters) for the tightest possible I2C timing.
     SensorQMI8658 _qmi;
-
-    // ---- QMI8658 FIFO (raw I2C) ----
-    // The FIFO is drained via raw Wire transactions (the driver's raw FIFO read is
-    // private). These are the QMI8658 register addresses and CTRL9 commands used by
-    // the FIFO read protocol (mirrors the driver's readFromFifo()).
-    static const uint8_t kRegFifoWtmTh  = 0x13; // FIFO watermark threshold (samples)
-    static const uint8_t kRegFifoCtrl   = 0x14; // FIFO mode/depth + read-mode bit
-    static const uint8_t kRegFifoCount  = 0x15; // FIFO sample count (2 bytes)
-    static const uint8_t kRegFifoStatus = 0x16; // FIFO status (bit4=not empty, bit5=overflow)
-    static const uint8_t kRegFifoData   = 0x17; // FIFO data (burst read)
-    static const uint8_t kRegCtrl9      = 0x0A; // CTRL9 command register
-    static const uint8_t kRegStatusInt  = 0x2D; // STATUS_INT (bit7 = CTRL9 cmd done)
-    static const uint8_t kCmdRstFifo    = 0x04; // CTRL9: reset FIFO
-    static const uint8_t kCmdReqFifo    = 0x05; // CTRL9: enter FIFO read mode
-    static const uint8_t kCmdAck        = 0x00; // CTRL9: ack / clear command done
-    // FIFO_CTRL value for Stream mode, 128-sample depth: (depth_enc << 2) | mode,
-    // where depth_enc 3 = 128 samples and mode 2 = Stream.
-    static const uint8_t kFifoCtrlStream128 = (3 << 2) | 2;
-    // The watermark (samples) that triggers the FIFO's watermark flag; we drain on
-    // a ~20 ms cadence and also check this, so 32 (32 ms of data) is a good target.
-    static const uint8_t kFifoWatermark = 32;
-    // Max bytes the FIFO can hold: 128 samples x 12 bytes (accel+gyro) = 1536.
-    static const size_t kFifoMaxBytes = 1536;
-    // The raw FIFO data buffer (PSRAM so it doesn't eat internal DRAM). Allocated
-    // once in configurePolling and reused by every drain.
-    uint8_t* _fifoBuf = nullptr;
-
-    // Do one CTRL9 command handshake: write `cmd` to CTRL9, wait for STATUS_INT
-    // bit7 (cmd done), write ACK, wait for the done bit to clear. Returns true on
-    // success. Mirrors the driver's private writeCommand().
-    bool qmiCtrl9Command(uint8_t cmd);
-    // Read a single register (1 byte) via raw Wire. Returns false on I2C error.
-    bool qmiReadReg(uint8_t reg, uint8_t* out);
-    // Write a single register (1 byte) via raw Wire. Returns false on I2C error.
-    bool qmiWriteReg(uint8_t reg, uint8_t val);
-    // Burst-read `len` bytes starting at register `reg` via raw Wire. Returns false
-    // on I2C error.
-    bool qmiReadRegBurst(uint8_t reg, uint8_t* buf, size_t len);
 };
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
