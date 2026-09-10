@@ -4197,6 +4197,22 @@ void setup() {
   // enabling it the panel has no power and stays dark (no crash). Must run
   // before the display is brought up. Mirrors the working Waveshare reference.
   {
+    // Diagnostic: scan the I2C bus and read the AXP chip-ID register (0x03)
+    // directly, so we can tell *why* init fails (no device vs wrong ID).
+    {
+      Serial.print("I2C scan:");
+      for (uint8_t a = 1; a < 127; a++) {
+        Wire.beginTransmission(a);
+        if (Wire.endTransmission() == 0) Serial.printf(" %02X", a);
+      }
+      Serial.println();
+      Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
+      Wire.write(0x03);
+      Wire.endTransmission(false);
+      Wire.requestFrom(AXP2101_SLAVE_ADDRESS, 1);
+      uint8_t ic = Wire.available() ? Wire.read() : 0;
+      Serial.printf("AXP2101 0x03 read = 0x%02X (expect 0x4A)\n", ic);
+    }
     XPowersPMU pmu(Wire, IIC_SDA, IIC_SCL, AXP2101_SLAVE_ADDRESS);
     if (pmu.init()) {
       pmu.enableALDO3(); // display power rail
