@@ -970,10 +970,16 @@ void Screen_GyroLog(bool forceRefresh = false)
   if(gyroLog.isRecording())
     return;
 
-  // The live IMU values change constantly, so always refresh unless the screen
-  // content is unchanged and nothing was pressed.
-  if(!forceRefresh && !tappedAction && lastRefreshedScreen == camera->getLastModified())
-    return;
+  // Two modes: the "last clip" summary (static until the camera changes) and the
+  // live calibration readout (the IMU values change every instant). Only the
+  // summary may skip a refresh when nothing changed; the live readout must
+  // redraw every loop tick or the numbers appear frozen. (The IMU is always
+  // powered up, so the live readout always has current values.)
+  const bool showSummary = gyroLog.getSummary().valid;
+  if(showSummary && !forceRefresh && !tappedAction && lastRefreshedScreen == camera->getLastModified())
+  {
+    return; // summary is unchanged and nothing was pressed
+  }
   lastRefreshedScreen = camera->getLastModified();
 
   sprite->fillSprite(TFT_BLACK);
@@ -4232,6 +4238,12 @@ void setup() {
   // backlight (GPIO46).
   if(!display.begin())
     Serial.println("WaveshareS3Display: begin() FAILED - display may be dark");
+
+  // IMU (QMI8658): bring it up once, here, and leave it up for the whole device
+  // lifetime. It is only powered down at full device shutdown (never between
+  // clips or screens), so the calibration screen always has live values and the
+  // next recording can re-use it without a re-power-up.
+  gyroLog.ensureImuUp();
 
   // Touch (CST816T). begin() resets the controller and attaches the INT interrupt.
   touch.begin(FALLING);

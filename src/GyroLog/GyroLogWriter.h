@@ -147,6 +147,12 @@ public:
     // accel in g. Returns false if the sensor isn't up (nothing read).
     bool readImuLive(float& gx, float& gy, float& gz, float& ax, float& ay, float& az);
 
+    // Bring the QMI8658 up (idempotent) so readImuLive() returns real data on the
+    // calibration screen, which is shown while NOT recording. The sensor is left
+    // powered up afterwards (it is only powered down at full device shutdown), so
+    // this is a cheap no-op once it is up.
+    void ensureImuUp();
+
     // Finalise the current log: stop the tasks, drain the ring, close the file,
     // and commit the directory entry to the card. Populates the summary. Returns
     // true if a log was active.

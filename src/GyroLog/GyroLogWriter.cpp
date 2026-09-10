@@ -613,6 +613,15 @@ bool GyroLogWriter::readImuLive(float& gx, float& gy, float& gz, float& ax, floa
     return true;
 }
 
+void GyroLogWriter::ensureImuUp()
+{
+    // configurePolling() is idempotent: it (re)reads WHO_AM_I and re-applies the
+    // gyro/accel config. If the sensor is already up this is a cheap no-op; if it
+    // was powered down (e.g. after the last clip ended) it brings it back up so the
+    // calibration screen can show live values. The sensor is left up afterwards.
+    configurePolling();
+}
+
 bool GyroLogWriter::end()
 {
     if(_state != State::Recording)
@@ -631,9 +640,10 @@ bool GyroLogWriter::end()
     // the file and commit the directory entry.
     drainRing();
 
-    // Power the QMI8658 down now that we're done sampling, so it stops consuming
-    // I2C bus time and power between clips. The next begin() re-configures it.
-    _qmi.powerDown();
+    // Leave the QMI8658 powered up: it is only powered down at full device
+    // shutdown, not between clips. Keeping it up means the calibration screen can
+    // show live values immediately after a clip, and the next begin() can re-use it
+    // without a re-power-up. (configurePolling() in begin() is idempotent.)
     _fifoConfigured = false;
 
     if(_file)
