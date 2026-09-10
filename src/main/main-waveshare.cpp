@@ -1049,6 +1049,9 @@ void Screen_GyroLog(bool forceRefresh = false)
     float gx, gy, gz, ax, ay, az;
     {
       float rgx, rgy, rgz, rax, ray, raz;
+      // readImuLive() does an I2C read on the shared bus; hold the I2C lock so it
+      // can't interleave with the sampler task's FIFO burst read.
+      GyroLogWriter::I2cGuard i2c(gyroLog.i2cMutex());
       gyroLog.readImuLive(rgx, rgy, rgz, rax, ray, raz); // gyro deg/s, accel g
       gx = rgx * 3.14159265f / 180.0f; // deg/s -> rad/s
       gy = rgy * 3.14159265f / 180.0f;
@@ -4793,13 +4796,19 @@ void loop() {
   btnBPressed = false;
 
   // --- Touch: taps are hit-tested by the screens (swipes no longer navigate) ---
-  if(touch.available())
+  // The touch controller shares the I2C bus with the QMI8658 IMU. The IMU sampler
+  // task (core 1) does a multi-tick FIFO burst read on that same bus, so this touch
+  // read must hold the shared I2C lock to avoid interleaving mid-transaction.
   {
-    if(touch.data.eventID == CST9220::TOUCHEVENT::UP)
+    GyroLogWriter::I2cGuard i2c(gyroLog.i2cMutex());
+    if(touch.available())
     {
-      // A plain tap: stash the coordinates for the screens to hit-test.
-      tapped_x = touch.data.x;
-      tapped_y = touch.data.y;
+      if(touch.data.eventID == CST9220::TOUCHEVENT::UP)
+      {
+        // A plain tap: stash the coordinates for the screens to hit-test.
+        tapped_x = touch.data.x;
+        tapped_y = touch.data.y;
+      }
     }
   }
 

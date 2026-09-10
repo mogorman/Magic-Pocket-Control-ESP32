@@ -136,10 +136,9 @@ void GyroLogWriter::closeFile()
 // the I2C load trivial (~12 KB/s) and the "t" index dense by construction.
 void GyroLogWriter::configurePolling()
 {
-    // Bring the QMI8658 up on the shared I2C bus (SDA=15, SCL=14). The board
-    // straps it to the "L" address (0x6B). begin() is idempotent enough that we
-    // can call it on every recording start; if the chip is already up it just
-    // re-reads the WHO_AM_I.
+    // Bring the QMI8658 up on the shared I2C bus (SDA=42, SCL=41). The board
+    // straps it to the "L" address (0x6B). begin() does the chip reset + WHO_AM_I
+    // check. It's idempotent enough to call on every recording start.
     if(!_qmi.begin(Wire, kImuAddr, kImuSda, kImuScl))
     {
         DEBUG_ERROR("[GYRO] configurePolling(): QMI8658 begin FAILED (addr=0x%02X) -- no IMU data",
@@ -161,64 +160,260 @@ void GyroLogWriter::configurePolling()
     _qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_8G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
     _qmi.enableAccelerometer();
 
-    // For the 1 kHz poll mode the output rate is exactly our poll rate (1 kHz),
-    // so tscale is simply 1 ms per sample. We set it here (not measured) because
-    // the poll cadence -- not the sensor's internal ODR -- defines the sample
-    // spacing in the file.
-    _tscale = 0.001f; // 1 ms per sample (1 kHz)
-    DEBUG_INFO("[GYRO] configurePolling(): QMI8658 1 kHz mode (gyro 1024dps, accel 8g), tscale=0.001000 s");
+    // The output rate is 1 kHz, so tscale is 1 ms per sample.
+    _tscale = 0.001f;
+
+    // Allocate the raw FIFO data buffer once (PSRAM). 1536 bytes = 128 samples x
+    // 12 bytes (accel+gyro).
+    if(!_fifoBuf)
+        _fifoBuf = (uint8_t*)ps_malloc(kFifoMaxBytes);
+
+    // ---- Configure the hardware FIFO (Stream mode, 128-sample depth) ----
+    // The sensor now buffers every 1 kHz sample itself. We drain it in batches
+    // from the sampler task (drainFifo), so a slow I2C read can't lose or repeat
+    // a sample. The I2C config sequence is held under the shared I2C lock so it
+    // can't be interleaved with the main loop's touch/IMU reads.
+    {
+        I2cGuard guard(_i2cMutex);
+        // 1. Reset the FIFO so it starts empty.
+        qmiCtrl9Command(kCmdRstFifo);
+        // 2. FIFO_CTRL = Stream mode, 128-sample depth.
+        qmiWriteReg(kRegFifoCtrl, kFifoCtrlStream128);
+        // 3. Watermark at 32 samples (32 ms of data) -- the sampler also drains on
+        //    a ~20 ms cadence, so the watermark is a backstop, not the primary
+        //    trigger.
+        qmiWriteReg(kRegFifoWtmTh, kFifoWatermark);
+    }
+
+    // ---- Warm-up settle + FIFO reset ----
+    // After (re)configuring, the gyro's digital filter needs ~100 ms to settle;
+    // before that the gyro output reads ~0. We let the sensor run for 100 ms (the
+    // FIFO fills with settling data -- this delay is OUTSIDE the I2C lock so the
+    // main loop's touch/IMU reads aren't blocked), then RESET the FIFO so the first
+    // sample we log is already settled -- no zeroed ramp at the start of the clip.
+    delay(100);
+    {
+        I2cGuard guard(_i2cMutex);
+        qmiCtrl9Command(kCmdRstFifo);
+    }
+
+    DEBUG_INFO("[GYRO] configurePolling(): QMI8658 1 kHz, FIFO Stream/128 (wm %u), 100ms settle, tscale=0.001000 s",
+        (unsigned)kFifoWatermark);
     _fifoConfigured = true;
 }
 
-// Read the latest gyro+accel sample from the QMI8658 output registers and append
-// one dense GCSV row to the ring. The QMI8658's output registers always hold the
-// most recent sample: accel X/Y/Z (6 B) at 0x3D and gyro X/Y/Z (6 B) at 0x43.
-// We read them via the driver's raw getters (two small I2C reads) and write one
-// row with the running _fifoSeq as the "t" index. Because the sampler calls this
-// exactly once per 1 ms tick, the "t" index is dense (0,1,2,...) and the timeline
-// is accurate.
-uint32_t GyroLogWriter::pollOutputRegisters()
-{
-    int16_t rawAcc[3];
-    int16_t rawGyr[3];
+// ---- Raw-Wire QMI8658 helpers (FIFO read protocol) ----
+// The driver's raw FIFO read is private, so we drive the FIFO over the shared
+// I2C bus directly. These mirror the driver's readFromFifo() register protocol.
 
-    // Read the raw (unscaled) 16-bit samples. Each getter is one short I2C read of
-    // 6 bytes. Retry a couple times on an I2C glitch (a failure means no data was
-    // transferred, so a retry re-reads the same latest sample).
-    bool okA = false, okG = false;
-    for(int attempt = 0; attempt < 3 && (!okA || !okG); attempt++)
+// One CTRL9 command handshake: write `cmd` to CTRL9, wait for STATUS_INT bit7
+// (command done), write ACK, then wait for the done bit to clear. Returns true on
+// success. Mirrors the driver's private writeCommand().
+bool GyroLogWriter::qmiCtrl9Command(uint8_t cmd)
+{
+    // Issue the command.
+    if(!qmiWriteReg(kRegCtrl9, cmd))
+        return false;
+
+    // Wait for the command-done flag (STATUS_INT bit7).
+    uint32_t start = millis();
+    for(;;)
     {
-        if(!okA) okA = _qmi.getAccelRaw(rawAcc);
-        if(!okG) okG = _qmi.getGyroRaw(rawGyr);
+        uint8_t s = 0;
+        if(!qmiReadReg(kRegStatusInt, &s))
+            return false;
+        if(s & 0x80)
+            break;
+        if(millis() - start > 100) // 100 ms timeout
+            return false;
+        delay(1);
     }
-    if(!okA || !okG)
+
+    // Acknowledge (clears the done flag).
+    if(!qmiWriteReg(kRegCtrl9, kCmdAck))
+        return false;
+
+    // Wait for the done flag to clear.
+    start = millis();
+    for(;;)
+    {
+        uint8_t s = 0;
+        if(!qmiReadReg(kRegStatusInt, &s))
+            return false;
+        if(!(s & 0x80))
+            break;
+        if(millis() - start > 100)
+            return false;
+        delay(1);
+    }
+    return true;
+}
+
+bool GyroLogWriter::qmiReadReg(uint8_t reg, uint8_t* out)
+{
+    Wire.beginTransmission(kImuAddr);
+    Wire.write(reg);
+    if(Wire.endTransmission() != 0)
+        return false;
+    Wire.requestFrom(kImuAddr, (uint8_t)1);
+    if(Wire.available() < 1)
+        return false;
+    *out = (uint8_t)Wire.read();
+    return true;
+}
+
+bool GyroLogWriter::qmiWriteReg(uint8_t reg, uint8_t val)
+{
+    Wire.beginTransmission(kImuAddr);
+    Wire.write(reg);
+    Wire.write(val);
+    return Wire.endTransmission() == 0;
+}
+
+bool GyroLogWriter::qmiReadRegBurst(uint8_t reg, uint8_t* buf, size_t len)
+{
+    Wire.beginTransmission(kImuAddr);
+    Wire.write(reg);
+    if(Wire.endTransmission() != 0)
+        return false;
+    Wire.requestFrom(kImuAddr, (uint8_t)len);
+    size_t got = 0;
+    while(got < len && Wire.available())
+        buf[got++] = (uint8_t)Wire.read();
+    return got == len;
+}
+
+// Drain the QMI8658 FIFO: read its status/count, burst-read all buffered samples
+// in one I2C transaction, parse each 12-byte sample (accel then gyro, raw int16)
+// into one dense GCSV row each, and append them to the ring. Returns the number
+// of rows appended (0 if the FIFO was empty or a read failed).
+//
+// The FIFO sample layout (12 bytes each, little-endian int16):
+//   [ax lo][ax hi][ay lo][ay hi][az lo][az hi][gx lo][gx hi][gy lo][gy hi][gz lo][gz hi]
+// i.e. the first 6 bytes are the accelerometer, the next 6 the gyroscope. The
+// FIFO stores them in sample order, so the "t" index stays dense (0,1,2,...).
+uint32_t GyroLogWriter::drainFifo()
+{
+    if(!_fifoConfigured || !_fifoBuf)
+        return 0;
+
+    // Hold the shared I2C lock for the WHOLE drain (status -> count -> REQ_FIFO ->
+    // burst read -> exit read mode). The sequence must be atomic w.r.t. the main
+    // loop's I2C use (touch poll, live IMU read), which shares the same bus and
+    // could otherwise preempt us mid-sequence (e.g. between REQ_FIFO and the burst
+    // read, leaving the FIFO stuck in read mode).
+    if(!i2cLock(200))
     {
         _i2cFailures++;
-        return 0; // this tick's sample is lost (a single gap); the next tick recovers
+        return 0;
     }
 
-    int16_t rawAx = rawAcc[0];
-    int16_t rawAy = rawAcc[1];
-    int16_t rawAz = rawAcc[2];
-    int16_t rawGx = rawGyr[0];
-    int16_t rawGy = rawGyr[1];
-    int16_t rawGz = rawGyr[2];
-
-    char row[64];
-    int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
-        (unsigned long)_fifoSeq,
-        (long)rawGx, (long)rawGy, (long)rawGz,
-        (long)rawAx, (long)rawAy, (long)rawAz);
-
-    if(xSemaphoreTake(_ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    // 1. FIFO status: bit4 = not empty.
+    uint8_t status = 0;
+    if(!qmiReadReg(kRegFifoStatus, &status))
     {
-        _ring.write((const uint8_t*)row, (size_t)n);
+        _i2cFailures++;
+        i2cUnlock();
+        return 0;
+    }
+    if(!(status & 0x10)) // bit4 clear -> FIFO empty
+    {
+        i2cUnlock();
+        return 0;
+    }
+
+    // 2. FIFO count (2 bytes). fifo_bytes = 2 * count; nSamples = fifo_bytes / 12.
+    uint8_t cnt[2] = {0, 0};
+    if(!qmiReadRegBurst(kRegFifoCount, cnt, 2))
+    {
+        _i2cFailures++;
+        i2cUnlock();
+        return 0;
+    }
+    uint16_t fifoBytes = (uint16_t)(2 * (((cnt[1] & 0x03) << 8) | cnt[0]));
+    uint16_t nSamples = fifoBytes / 12;
+    if(nSamples == 0)
+    {
+        i2cUnlock();
+        return 0;
+    }
+    // Clamp to the buffer capacity (shouldn't exceed 128 in Stream mode, but be safe).
+    if(fifoBytes > kFifoMaxBytes)
+        fifoBytes = (uint16_t)kFifoMaxBytes;
+
+    // 3. Enter FIFO read mode (CTRL9 REQ_FIFO).
+    if(!qmiCtrl9Command(kCmdReqFifo))
+    {
+        _i2cFailures++;
+        i2cUnlock();
+        return 0;
+    }
+
+    // 4. Burst-read the FIFO data.
+    if(!qmiReadRegBurst(kRegFifoData, _fifoBuf, fifoBytes))
+    {
+        _i2cFailures++;
+        // Try to leave read mode so the next attempt isn't stuck.
+        qmiWriteReg(kRegFifoCtrl, kFifoCtrlStream128);
+        i2cUnlock();
+        return 0;
+    }
+
+    // 5. Exit FIFO read mode (write FIFO_CTRL back to the stream-mode value).
+    qmiWriteReg(kRegFifoCtrl, kFifoCtrlStream128);
+
+    // The I2C sequence is done -- release the bus lock before the (non-I2C) parse
+    // and ring write, so the main loop's I2C use isn't blocked by our parsing.
+    i2cUnlock();
+
+    // 6. Parse each 12-byte sample into one dense GCSV row and append to the ring.
+    //    We build all the rows for this batch in a local buffer, then write them to
+    //    the ring in one shot (minimises ring-mutex churn).
+    static char* s_rows = nullptr;
+    static size_t s_rowsCap = 0;
+    size_t need = (size_t)nSamples * 48; // generous: each row is <= ~40 bytes
+    if(s_rowsCap < need)
+    {
+        if(s_rows)
+            free(s_rows);
+        s_rowsCap = need;
+        s_rows = (char*)malloc(s_rowsCap);
+        if(!s_rows)
+            return 0;
+    }
+
+    size_t off = 0;
+    uint32_t rowsWritten = 0;
+    for(uint16_t i = 0; i < nSamples; i++)
+    {
+        const uint8_t* p = _fifoBuf + (size_t)i * 12;
+        int16_t ax = (int16_t)((p[1] << 8) | p[0]);
+        int16_t ay = (int16_t)((p[3] << 8) | p[2]);
+        int16_t az = (int16_t)((p[5] << 8) | p[4]);
+        int16_t gx = (int16_t)((p[7] << 8) | p[6]);
+        int16_t gy = (int16_t)((p[9] << 8) | p[8]);
+        int16_t gz = (int16_t)((p[11] << 8) | p[10]);
+
+        int n = snprintf(s_rows + off, s_rowsCap - off, "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
+            (unsigned long)_fifoSeq,
+            (long)gx, (long)gy, (long)gz,
+            (long)ax, (long)ay, (long)az);
+        if(n <= 0)
+            break;
+        off += (size_t)n;
+        _fifoSeq++;
+        rowsWritten++;
+    }
+
+    if(rowsWritten > 0 && xSemaphoreTake(_ringMutex, pdMS_TO_TICKS(5)) == pdTRUE)
+    {
+        _ring.write((const uint8_t*)s_rows, off);
         xSemaphoreGive(_ringMutex);
         if(_dataSem)
             xSemaphoreGive(_dataSem); // wake the writer
     }
-    _fifoSeq++;
-    return 1;
+
+    return rowsWritten;
 }
 
 // Drain as much of the ring buffer as possible to the file. Two-phase so the
@@ -348,82 +543,56 @@ void GyroLogWriter::samplerTaskTrampoline(void* param)
 
 void GyroLogWriter::samplerTask()
 {
-    // 1 kHz sampling pinned to the REAL-TIME 1 ms grid (esp_timer_get_time,
-    // microsecond-accurate). Each iteration we:
-    //   1. spin (with tiny yields so the writer task gets scheduled) until the
-    //      next 1 ms boundary,
-    //   2. read the latest sample exactly on the boundary and append one dense row,
-    //   3. advance to the next boundary.
-    // Pinning to the grid (rather than a vTaskDelay(1) tick) means a slow I2C
-    // read or a brief scheduler hiccup does NOT accumulate drift: the next sample
-    // is always at the next 1 ms boundary, so the long-run rate is exactly 1 kHz
-    // and the "t" index stays dense.
-    uint64_t nextBoundaryUs = 0;
+    // The QMI8658's hardware FIFO buffers every 1 kHz sample the sensor produces.
+    // We drain it on a ~20 ms cadence: each drain is a single I2C burst read of all
+    // the samples buffered since the last drain (up to 128 = 128 ms of data), so a
+    // slow read neither loses nor repeats a sample. The "t" index stays dense
+    // (0,1,2,...) because we assign it sequentially as we parse the FIFO samples in
+    // order.
+    //
+    // Cadence: 20 ms is well under the FIFO's 128 ms capacity, so the FIFO never
+    // overflows (in Stream mode the oldest samples would be dropped on overflow).
+    // A 20 ms drain of ~20 samples is a ~240-byte burst read (~10 ms at 400 kHz),
+    // comfortably within the 20 ms window.
+    const uint32_t kDrainIntervalMs = 20;
+
     for(;;)
     {
         // Not recording: poll _state every ~5 ms (cheap) until a recording starts.
         if(_state != State::Recording)
         {
             vTaskDelay(pdMS_TO_TICKS(5));
-            nextBoundaryUs = 0; // resync the grid on (re)start
             continue;
         }
 
-        // Compute the next 1 ms boundary (in esp_timer us) if we haven't yet.
-        if(nextBoundaryUs == 0)
-        {
-            uint64_t now = esp_timer_get_time();
-            nextBoundaryUs = ((now / 1000) + 1) * 1000;
-        }
-
-        // Wait until the next 1 ms boundary. Two phases:
-        //   1. While there's more than one tick (~1 ms) to the boundary, sleep a
-        //      tick (vTaskDelay). A pure spin here would starve the CPU idle task
-        //      and trip the task watchdog; sleeping a tick keeps it happy.
-        //   2. In the final sub-tick window (<= ~1 ms to the boundary), tight-spin
-        //      on the microsecond timer for microsecond accuracy (a vTaskDelay
-        //      here would overshoot the boundary by up to a full tick).
-        while(true)
-        {
-            int64_t now = esp_timer_get_time();
-            int64_t toGo = nextBoundaryUs - now;
-            if(toGo <= 0)
-                break;
-            if(toGo > 1000) // > 1 ms to go: sleep a tick so the idle task runs
-                vTaskDelay(1);
-            else
-                portYIELD(); // final sub-tick: tight spin for accuracy
-        }
-
-        // Read the latest sample exactly on the boundary and append one dense row.
+        // Drain the FIFO.
         uint32_t tRead0 = micros();
-        pollOutputRegisters();
+        drainFifo();
         uint32_t readUs = micros() - tRead0;
 
 #if GYROLOG_DEBUG
-        // Once per second, report the loop rate and the I2C read time distribution,
-        // to see how close to 1 kHz we are and where time goes.
+        // Once per second, report the drain rate and the I2C read time distribution.
         {
             static uint32_t dLast = 0;
-            static uint32_t dLoops = 0, dReadUs = 0, dMaxRead = 0;
-            dLoops++;
+            static uint32_t dDrains = 0, dReadUs = 0, dMaxRead = 0;
+            dDrains++;
             dReadUs += readUs;
             if(readUs > dMaxRead) dMaxRead = readUs;
             uint32_t now = millis();
             if(dLast == 0) dLast = now;
             if(now - dLast >= 1000)
             {
-                DEBUG_INFO("[GYRO-DIAG] sampler: %lu loops/s (want ~1000), avg I2C read %lu us, max %lu us",
-                    (unsigned long)dLoops, (unsigned long)(dLoops ? dReadUs / dLoops : 0), (unsigned long)dMaxRead);
-                dLast = now; dLoops = 0; dReadUs = 0; dMaxRead = 0;
+                DEBUG_INFO("[GYRO-DIAG] sampler: %lu drains/s (want ~50), avg I2C read %lu us, max %lu us",
+                    (unsigned long)dDrains, (unsigned long)(dDrains ? dReadUs / dDrains : 0), (unsigned long)dMaxRead);
+                dLast = now; dDrains = 0; dReadUs = 0; dMaxRead = 0;
             }
         }
 #else
         (void)readUs;
 #endif
 
-        // Advance to the next 1 ms boundary.
-        nextBoundaryUs += 1000;
+        // Sleep until the next drain. The FIFO holds the samples in the meantime.
+        vTaskDelay(pdMS_TO_TICKS(kDrainIntervalMs));
     }
 }
 
@@ -455,11 +624,19 @@ void GyroLogWriter::stopSamplerTask()
 {
     // The sampler task is persistent -- we don't delete it. We just make it sleep
     // by clearing the recording state (done in end()) and wake it so it notices.
-    // We do one final output-register read here (on the calling task) to flush
-    // the very end of the clip into the ring before the writer commits it.
-    pollOutputRegisters();
+    // We do one final FIFO drain here (on the calling task) to flush the very end
+    // of the clip into the ring before the writer commits it.
+    drainFifo();
     if(_dataSem)
         xSemaphoreGive(_dataSem); // wake the sampler so it sees _state != Recording
+}
+
+GyroLogWriter::GyroLogWriter()
+{
+    // Create the shared I2C bus mutex. Every I2C transaction (FIFO read, touch
+    // poll, live IMU read) takes this so a multi-tick FIFO burst read on the
+    // sampler task can't be preempted mid-transaction by the main loop's I2C use.
+    _i2cMutex = xSemaphoreCreateMutex();
 }
 
 GyroLogWriter::~GyroLogWriter()
@@ -475,6 +652,24 @@ GyroLogWriter::~GyroLogWriter()
         vSemaphoreDelete(_dataSem);
         _dataSem = nullptr;
     }
+    if(_i2cMutex)
+    {
+        vSemaphoreDelete(_i2cMutex);
+        _i2cMutex = nullptr;
+    }
+}
+
+bool GyroLogWriter::i2cLock(uint32_t timeoutMs) const
+{
+    if(!_i2cMutex)
+        return true; // no mutex (shouldn't happen); proceed unlocked
+    return xSemaphoreTake(_i2cMutex, pdMS_TO_TICKS(timeoutMs)) == pdTRUE;
+}
+
+void GyroLogWriter::i2cUnlock() const
+{
+    if(_i2cMutex)
+        xSemaphoreGive(_i2cMutex);
 }
 
 bool GyroLogWriter::begin(const std::string& clipName, const std::string& extension, const std::string& timecode, const std::string& lensInfo)
@@ -572,11 +767,10 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         _dataSem = xSemaphoreCreateBinary();
     _writerStop = false;
     _samplerStop = false;
+    _fifoSeq = 0; // GCSV "t" starts at 0 (set before the sampler can drain)
+    _i2cFailures = 0;
     startWriterTask();
     startSamplerTask();
-
-    _fifoSeq = 0; // GCSV "t" starts at 0
-    _i2cFailures = 0;
 
     _state = State::Recording;
     // Wake the (persistent) writer task so it sees the new state and starts
