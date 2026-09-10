@@ -15,9 +15,9 @@
 //      the expected size, then report a PASS/FAIL.
 // This exercises the full production SD path (begin/end/syncVolume) and checks
 // the resulting file is well-formed, without needing a camera connected.
-#ifndef GYRO_E2E_TEST
-#define GYRO_E2E_TEST 1
-#endif
+ #ifndef GYRO_E2E_TEST
+ #define GYRO_E2E_TEST 0
+ #endif
 // How long (seconds) the E2E test records before stopping.
 #ifndef GYRO_E2E_DURATION_S
 #define GYRO_E2E_DURATION_S 30
