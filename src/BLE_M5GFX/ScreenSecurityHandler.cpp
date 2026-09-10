@@ -12,6 +12,17 @@ ScreenSecurityHandler::ScreenSecurityHandler(BMDCameraConnection* bmdCameraConne
   _screenHeight = screenHeight;
 }
 
+// The PIN pad layout is authored for a 320px-wide screen (the original M5Stack
+// layout). On a narrower panel (e.g. the 240px Waveshare 1.54) the rightmost
+// column of keys would fall off-screen, so we scale every x coordinate by
+// (screenWidth / 320). Y is left unscaled - the layout's y range (0..220) already
+// fits a 240px-tall panel. The same scale is applied in KeyPressed() so the
+// hit-test matches the drawn buttons.
+static inline int scaleX(int x, int screenWidth)
+{
+    return (x * screenWidth) / 320;
+}
+
 // Triggers when a Pass Key is required
 uint32_t ScreenSecurityHandler::onPassKeyRequest()
 {
@@ -22,6 +33,8 @@ uint32_t ScreenSecurityHandler::onPassKeyRequest()
     unsigned long startTime = millis();
     unsigned long currentTime = 0;
 
+    const int W = _screenWidth; // native layout is 320 wide; scale to this
+
     // Draw the screen
     _windowPtr->fillScreen(TFT_BLACK);
 
@@ -30,37 +43,43 @@ uint32_t ScreenSecurityHandler::onPassKeyRequest()
     _windowPtr->fillRect(13, 0, 2, _screenHeight, TFT_DARKGREY);
 
     _windowPtr->setTextColor(TFT_WHITE);
-    _windowPtr->drawString("Code:", 24, 7, &Lato_Regular11pt7b);
+    _windowPtr->drawString("Code:", scaleX(24, W), 7, &Lato_Regular11pt7b);
 
-    // Draw the 11 buttons, left to right, top to bottom
-    _windowPtr->fillSmoothRoundRect(20, 30, 70, 60, 5, TFT_YELLOW); // 7
-    _windowPtr->fillSmoothRoundRect(95, 30, 70, 60, 5, TFT_YELLOW); // 8
-    _windowPtr->fillSmoothRoundRect(170, 30, 70, 60, 5, TFT_YELLOW); // 9
-    _windowPtr->fillSmoothRoundRect(245, 30, 70, 60, 5, TFT_RED); // Back
+    // Draw the 11 buttons, left to right, top to bottom (x scaled to panel width)
+    _windowPtr->fillSmoothRoundRect(scaleX(20, W), 30, 70, 60, 5, TFT_YELLOW); // 7
+    _windowPtr->fillSmoothRoundRect(scaleX(95, W), 30, 70, 60, 5, TFT_YELLOW); // 8
+    _windowPtr->fillSmoothRoundRect(scaleX(170, W), 30, 70, 60, 5, TFT_YELLOW); // 9
+    _windowPtr->fillSmoothRoundRect(scaleX(245, W), 30, 70, 60, 5, TFT_RED); // Back
 
     _windowPtr->setTextColor(TFT_BLACK);
-    _windowPtr->drawString("7", 50, 53, &Lato_Regular11pt7b);
-    _windowPtr->drawString("8", 125, 53, &Lato_Regular11pt7b);
-    _windowPtr->drawString("9", 200, 53, &Lato_Regular11pt7b);
-    _windowPtr->fillTriangle(269, 60, 289, 45, 289, 73, TFT_BLACK);
+    _windowPtr->drawString("7", scaleX(50, W), 53, &Lato_Regular11pt7b);
+    _windowPtr->drawString("8", scaleX(125, W), 53, &Lato_Regular11pt7b);
+    _windowPtr->drawString("9", scaleX(200, W), 53, &Lato_Regular11pt7b);
+    _windowPtr->fillTriangle(scaleX(269, W), 60, scaleX(289, W), 45, scaleX(289, W), 73, TFT_BLACK);
 
-    _windowPtr->fillSmoothRoundRect(20, 95, 70, 60, 5, TFT_YELLOW); // 4
-    _windowPtr->fillSmoothRoundRect(95, 95, 70, 60, 5, TFT_YELLOW); // 5
-    _windowPtr->fillSmoothRoundRect(170, 95, 70, 60, 5, TFT_YELLOW); // 6
-    _windowPtr->fillSmoothRoundRect(245, 95, 70, 125, 5, TFT_YELLOW); // 0
+    _windowPtr->fillSmoothRoundRect(scaleX(20, W), 95, 70, 60, 5, TFT_YELLOW); // 4
+    _windowPtr->fillSmoothRoundRect(scaleX(95, W), 95, 70, 60, 5, TFT_YELLOW); // 5
+    _windowPtr->fillSmoothRoundRect(scaleX(170, W), 95, 70, 60, 5, TFT_YELLOW); // 6
+    _windowPtr->fillSmoothRoundRect(scaleX(245, W), 95, 70, 125, 5, TFT_YELLOW); // 0
 
-    _windowPtr->drawString("4", 50, 118, &Lato_Regular11pt7b);
-    _windowPtr->drawString("5", 125, 118, &Lato_Regular11pt7b);
-    _windowPtr->drawString("6", 200, 118, &Lato_Regular11pt7b);
-    _windowPtr->drawString("0", 275, 151, &Lato_Regular11pt7b);
+    _windowPtr->drawString("4", scaleX(50, W), 118, &Lato_Regular11pt7b);
+    _windowPtr->drawString("5", scaleX(125, W), 118, &Lato_Regular11pt7b);
+    _windowPtr->drawString("6", scaleX(200, W), 118, &Lato_Regular11pt7b);
+    _windowPtr->drawString("0", scaleX(275, W), 151, &Lato_Regular11pt7b);
 
-    _windowPtr->fillSmoothRoundRect(20, 160, 70, 60, 5, TFT_YELLOW); // 1
-    _windowPtr->fillSmoothRoundRect(95, 160, 70, 60, 5, TFT_YELLOW); // 2
-    _windowPtr->fillSmoothRoundRect(170, 160, 70, 60, 5, TFT_YELLOW); // 3
+    _windowPtr->fillSmoothRoundRect(scaleX(20, W), 160, 70, 60, 5, TFT_YELLOW); // 1
+    _windowPtr->fillSmoothRoundRect(scaleX(95, W), 160, 70, 60, 5, TFT_YELLOW); // 2
+    _windowPtr->fillSmoothRoundRect(scaleX(170, W), 160, 70, 60, 5, TFT_YELLOW); // 3
 
-    _windowPtr->drawString("1", 50, 174, &Lato_Regular11pt7b);
-    _windowPtr->drawString("2", 125, 174, &Lato_Regular11pt7b);
-    _windowPtr->drawString("3", 200, 174, &Lato_Regular11pt7b);
+    _windowPtr->drawString("1", scaleX(50, W), 174, &Lato_Regular11pt7b);
+    _windowPtr->drawString("2", scaleX(125, W), 174, &Lato_Regular11pt7b);
+    _windowPtr->drawString("3", scaleX(200, W), 174, &Lato_Regular11pt7b);
+
+    // Log the computed button positions so the layout can be verified against the
+    // panel width (the rightmost key column must stay within screenWidth).
+    DEBUG_INFO("[PINPAD] panel %dx%d; rightmost key col x=%d..%d, 9/6/3 col x=%d..%d",
+      _windowPtr->width(), _windowPtr->height(),
+      scaleX(245, W), scaleX(315, W), scaleX(170, W), scaleX(240, W));
 
     bool pinComplete = false;
     std::vector<int> pinCodeArray;
@@ -70,7 +89,7 @@ uint32_t ScreenSecurityHandler::onPassKeyRequest()
     unsigned long lastTapTime = 0; // Ensure we don't count a tap as a double entry
 
     do
-    {  
+    {
         // Allow up to 15 seconds to enter the pass key
         currentTime = millis();
 
@@ -89,10 +108,10 @@ uint32_t ScreenSecurityHandler::onPassKeyRequest()
         }
 
         // Show the pin code entered
-        _windowPtr->fillRect(95, 0, 100, 21, TFT_BLACK);
+        _windowPtr->fillRect(scaleX(95, W), 0, 100, 21, TFT_BLACK);
         for(int count = 0; count < pinCodeArray.size(); count++)
         {
-            _windowPtr->drawString(String(pinCodeArray[count]), 95 + (count * 15), 7, &Lato_Regular11pt7b);
+            _windowPtr->drawString(String(pinCodeArray[count]), scaleX(95, W) + (count * 15), 7, &Lato_Regular11pt7b);
         }
 
         // Wait for Touches
@@ -178,31 +197,35 @@ void ScreenSecurityHandler::onAuthenticationComplete(esp_ble_auth_cmpl_t auth_cm
 // 0-9 for numbers
 // -1 for backspace
 // -2 for nothing
+// The x bounds are the 320-wide native layout scaled to the panel width (see
+// scaleX above) so the hit-test matches the drawn buttons on any panel size.
 int ScreenSecurityHandler::KeyPressed(int x, int y)
 {
-    if(x >= 20 && x <= 90 && y >= 30 && y <= 90)
+    const int W = _screenWidth;
+
+    if(x >= scaleX(20, W) && x <= scaleX(90, W) && y >= 30 && y <= 90)
         return 7;
-    else if(x >= 95 && x <= 165 && y >= 30 && y <= 90)
+    else if(x >= scaleX(95, W) && x <= scaleX(165, W) && y >= 30 && y <= 90)
         return 8;
-    else if(x >= 170 && x <= 240 && y >= 30 && y <= 90)
+    else if(x >= scaleX(170, W) && x <= scaleX(240, W) && y >= 30 && y <= 90)
         return 9;
-    else if(x >= 245 && y >= 30 && y <= 90)
+    else if(x >= scaleX(245, W) && y >= 30 && y <= 90)
         return -1;
 
-    else if(x >= 20 && x <= 90 && y >= 95 && y <= 155)
+    else if(x >= scaleX(20, W) && x <= scaleX(90, W) && y >= 95 && y <= 155)
         return 4;
-    else if(x >= 95 && x <= 165 && y >= 95 && y <= 155)
+    else if(x >= scaleX(95, W) && x <= scaleX(165, W) && y >= 95 && y <= 155)
         return 5;
-    else if(x >= 170 && x <= 240 && y >= 95 && y <= 155)
+    else if(x >= scaleX(170, W) && x <= scaleX(240, W) && y >= 95 && y <= 155)
         return 6;
-    else if(x >= 245 && y >= 95 && y <= 210)
+    else if(x >= scaleX(245, W) && y >= 95 && y <= 210)
         return 0;
 
-    else if(x >= 20 && x <= 90 && y >= 160 && y <= 220)
+    else if(x >= scaleX(20, W) && x <= scaleX(90, W) && y >= 160 && y <= 220)
         return 1;
-    else if(x >= 95 && x <= 165 && y >= 160 && y <= 220)
+    else if(x >= scaleX(95, W) && x <= scaleX(165, W) && y >= 160 && y <= 220)
         return 2;
-    else if(x >= 170 && x <= 240 && y >= 160 && y <= 220)
+    else if(x >= scaleX(170, W) && x <= scaleX(240, W) && y >= 160 && y <= 220)
         return 3;
 
     return -2;

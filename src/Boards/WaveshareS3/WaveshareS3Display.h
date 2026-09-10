@@ -18,6 +18,8 @@
 #include "M5GFX.h"
 #include "lgfx/v1/panel/Panel_ST7789.hpp"
 #include "lgfx/v1/platforms/esp32/Bus_SPI.hpp"
+#include "lgfx/v1/touch/Touch_CST816S.hpp"
+#include "driver/i2c.h" // i2c_port_t (I2C_NUM_0) for the touch config
 #include "Boards/WaveshareS3/pin_config.h"
 
 class WaveshareS3Display : public M5GFX
@@ -25,6 +27,7 @@ class WaveshareS3Display : public M5GFX
 public:
   lgfx::Panel_ST7789 _panel;
   lgfx::Bus_SPI      _bus;
+  lgfx::Touch_CST816S _touch;
 
   WaveshareS3Display()
   {
@@ -44,10 +47,6 @@ public:
       _panel.setBus(&_bus);
     }
     // ST7789 panel: 240x240 visible, GRAM is 240x320 (top 240 rows used).
-    // No touch is attached here: the app drives the CST816T with a standalone
-    // I2C reader (CST9220 driver), and the M5GFX touch init can hang the core-1
-    // watchdog if the IC doesn't answer. invert is left at its default (false),
-    // matching the working reference.
     {
       auto cfg = _panel.config();
       cfg.pin_cs   = LCD_CS;
@@ -64,6 +63,27 @@ public:
       // colors (without it the screen shows inverted colors).
       cfg.invert        = true;
       _panel.config(cfg);
+    }
+    // CST816T touch on the shared I2C bus (SDA=42 SCL=41), RST=47 INT=48.
+    // Attached to the panel so panel()->getTouch() returns a working lgfx::ITouch
+    // - the on-screen pass-key PIN pad (BLE_M5GFX/ScreenSecurityHandler) reads
+    // taps through that pointer. bus_shared=true because the touch shares the
+    // I2C bus with the IMU/audio.
+    {
+      auto cfg = _touch.config();
+      cfg.i2c_port  = I2C_NUM_0;
+      cfg.pin_scl   = IIC_SCL;
+      cfg.pin_sda   = IIC_SDA;
+      cfg.i2c_addr  = 0x15;
+      cfg.pin_rst   = TP_RST;
+      cfg.pin_int   = TP_INT;
+      cfg.x_min = 0;
+      cfg.x_max = 240;
+      cfg.y_min = 0;
+      cfg.y_max = 240;
+      cfg.bus_shared = true;
+      _touch.config(cfg);
+      _panel.setTouch(&_touch);
     }
     setPanel(&_panel);
   }

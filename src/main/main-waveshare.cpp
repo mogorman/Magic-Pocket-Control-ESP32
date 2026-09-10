@@ -4219,9 +4219,10 @@ void setup() {
   tft.pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
 
   // Prepare for Bluetooth connections and start scanning for cameras. The Waveshare
-  // display is an M5GFX object, but we use the serial pass-key entry path (the
-  // on-screen M5GFX pass-key handler is not wired up on this board).
-  cameraConnection.initialise(); // Serial security pass key
+  // display is an M5GFX object with the CST816T touch attached to its panel, so the
+  // pass key is entered on the on-screen PIN pad (BLE_M5GFX/ScreenSecurityHandler),
+  // not over serial. The PIN pad reads taps through the panel's lgfx::ITouch.
+  cameraConnection.initialise(display.panel()->getTouch(), &display, IWIDTH, IHEIGHT); // Screen Pass Key entry
 
   // When the connected camera's recording state changes, start/stop the gyro
   // log. The camera object is created when a connection is established, so we
@@ -4635,7 +4636,13 @@ void loop() {
       }
     }
     else
-      Screen_Dashboard(true); // Was on disconnected screen, now we're connected go to the dashboard
+    {
+      // First time we've connected: land on the Gyro Log screen (the default page
+      // when connected, matching the M5Stack). Setting lastRefreshedScreen = 0
+      // forces the next loop iteration to draw it.
+      connectedScreenIndex = Screens::GyroLog;
+      lastRefreshedScreen = 0;
+    }
 
     lastConnectedTime = currentTime;
   }
@@ -4643,17 +4650,12 @@ void loop() {
   {
     DEBUG_DEBUG("Cameras found!");
 
-    cameraConnection.connect(cameraConnection.cameraAddresses[0]);
-
-    if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::FailedPassKey)
-      DEBUG_DEBUG("Loop - Failed Pass Key");
-
-    // Clear the screen so we can show the default screen cleanly
-    tft.fillScreen(TFT_BLACK);
-
-    // Land on the Gyro Log screen (the new default page) when connected.
-    connectedScreenIndex = Screens::GyroLog;
-    lastRefreshedScreen = 0;
+    // Screen_NoConnection() draws "Found, connecting..." and (because a camera is
+    // selected) calls connect(), which blocks on the on-screen pass-key PIN pad.
+    // Once connect() returns with status==Connected, the Connected branch below
+    // lands on the dashboard. Without the Screen_NoConnection() call the screen
+    // would stay frozen on "Scanning..." for the whole pass-key exchange.
+    Screen_NoConnection();
 
     lastConnectedTime = currentTime;
   }
@@ -4663,6 +4665,13 @@ void loop() {
     cameraConnection.status = BMDCameraConnection::Disconnected;
     lastConnectedTime = currentTime;
 
+    Screen_NoConnection();
+  }
+  else if(cameraConnection.status == BMDCameraConnection::ConnectionStatus::FailedPassKey)
+  {
+    // Pass key was rejected (or timed out). Just redraw so the NoConnection screen
+    // shows "Wrong Pass Key". The Disconnected/FailedPassKey branch above re-scans
+    // once reconnectInterval (5s) has elapsed, so we don't change state here.
     Screen_NoConnection();
   }
 
