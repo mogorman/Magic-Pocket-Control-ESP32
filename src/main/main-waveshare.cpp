@@ -4192,6 +4192,7 @@ void setup() {
 
   // Shared I2C bus (touch, PMU, IMU, RTC, audio).
   Wire.begin(IIC_SDA, IIC_SCL);
+  Wire.setClock(400000);
 
   // AXP2101 PMU: the AMOLED is powered from the PMU's ALDO3 rail. Without
   // enabling it the panel has no power and stays dark (no crash). Must run
@@ -4200,6 +4201,7 @@ void setup() {
     // Diagnostic: scan the I2C bus and read the AXP chip-ID register (0x03)
     // directly, so we can tell *why* init fails (no device vs wrong ID).
     {
+      delay(100); // let the bus settle after Wire.begin
       Serial.print("I2C scan:");
       for (uint8_t a = 1; a < 127; a++) {
         Wire.beginTransmission(a);
