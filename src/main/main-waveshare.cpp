@@ -4214,6 +4214,13 @@ void setup() {
       Wire.requestFrom(AXP2101_SLAVE_ADDRESS, 1);
       uint8_t ic = Wire.available() ? Wire.read() : 0;
       Serial.printf("AXP2101 0x03 read = 0x%02X (expect 0x4A)\n", ic);
+      // Also probe the QMI8658 IMU (0x6B) WHO_AM_I (0x75) -> 0x05/0x95.
+      Wire.beginTransmission(0x6B);
+      Wire.write(0x75);
+      Wire.endTransmission(false);
+      Wire.requestFrom(0x6B, 1);
+      uint8_t qmi = Wire.available() ? Wire.read() : 0;
+      Serial.printf("QMI8658 0x75 read = 0x%02X (expect 0x05/0x95)\n", qmi);
     }
     XPowersPMU pmu(Wire, IIC_SDA, IIC_SCL, AXP2101_SLAVE_ADDRESS);
     if (pmu.init()) {
