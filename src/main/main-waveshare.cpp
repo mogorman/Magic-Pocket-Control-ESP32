@@ -4178,6 +4178,8 @@ void Screen_Lens(bool forceRefresh = false)
 
 void setup() {
 
+  Serial.begin(115200);
+
   // The QSPI AMOLED (CO5300). The panel + QSPI bus are brought up by the
   // off-screen canvas's begin() below (Arduino_Canvas::begin() calls the
   // parent gfx->begin() internally). Calling gfx->begin() here too would
