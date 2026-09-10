@@ -4177,15 +4177,15 @@ void Screen_Lens(bool forceRefresh = false)
 
 void setup() {
 
-  // The QSPI AMOLED (CO5300). begin() brings the panel up; the 0x36=0xA0 write
-  // sets the display orientation/scanning (straight from the Waveshare examples).
+  // The QSPI AMOLED (CO5300). The panel + QSPI bus are brought up by the
+  // off-screen canvas's begin() below (Arduino_Canvas::begin() calls the
+  // parent gfx->begin() internally). Calling gfx->begin() here too would
+  // double-init the SPI host (spi_bus_initialize) -> ESP_ERR_INVALID_STATE
+  // abort, so we do NOT call it separately.
   bus = new Arduino_ESP32QSPI(
     LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
   gfx = new Arduino_CO5300(
     bus, LCD_RESET, 0 /* rotation */, false /* ips */, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
-  gfx->begin();
-  gfx->setBrightness(200);
-  bus->writeC8D8(0x36, 0xA0);
 
   // Shared I2C bus (touch, PMU, IMU, RTC, audio).
   Wire.begin(IIC_SDA, IIC_SCL);
@@ -4199,9 +4199,14 @@ void setup() {
   keyC.attachClick([]() { keyCPressed = true; });
 
   // Off-screen 480x480 16-bit buffer (PSRAM) that the screen code draws into.
+  // begin() brings up the QSPI bus + panel (single init; do not also call gfx->begin()).
   sprite = new SpriteShim();
   sprite->createSprite(IWIDTH_SPRITE, IHEIGHT_SPRITE);
   sprite->begin();
+  // Now that the bus is up: set brightness and the display orientation/scanning
+  // (0x36=0xA0, straight from the Waveshare examples).
+  gfx->setBrightness(200);
+  bus->writeC8D8(0x36, 0xA0);
   sprite->setFont(&Lato_Regular11pt7b);
   sprite->setTextColor(TFT_WHITE);
 
