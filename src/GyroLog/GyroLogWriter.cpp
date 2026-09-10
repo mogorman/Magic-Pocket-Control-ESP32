@@ -1,7 +1,7 @@
 #include "GyroLogWriter.h"
 #include <SPI.h>
 #include <cstring> // strcmp
-#include <M5Unified.h> // M5.In_I2C (MPU6886 output-register reads)
+#include <Wire.h> // TwoWire (shared I2C bus for the QMI8658)
 #include <nvs.h>
 #include <esp_timer.h> // esp_timer_get_time() for the microsecond-accurate 1 kHz sampling grid
 #include <math.h>
@@ -30,9 +30,10 @@ const char* const GYROLOG_ORIENTATION_TOKENS[GyroLogWriter::kOrientationCount] =
     "ZYX", "ZyX", "ZYx", "zYx"
 };
 
-// gscale: raw gyro (deg/s) -> rad/s. MPU6886 is configured +/-2000 deg/s.
-static const float kGscale = (2000.0f * 3.141592653589793f / 180.0f) / 32768.0f;
-// ascale: raw accel (g) -> g. MPU6886 is configured +/-8 g.
+// gscale: raw gyro (deg/s) -> rad/s. The QMI8658 gyro is configured +/-1024 deg/s
+// (the driver's maximum range; there is no 2000 dps member in SensorQMI8658).
+static const float kGscale = (1024.0f * 3.141592653589793f / 180.0f) / 32768.0f;
+// ascale: raw accel (g) -> g. The QMI8658 accelerometer is configured +/-8 g.
 static const float kAscale = 8.0f / 32768.0f;
 
 // The year assumed for a clip's date until the real date is learned from the
@@ -66,12 +67,11 @@ static std::string sanitiseClipName(const std::string& name)
     return out;
 }
 
-// Mount the SD card via SdFat. The Core2's microSD slot is on the SPI bus with
-// its chip-select on GPIO4. We share the SPI bus with the M5GFX display
-// (SHARED_SPI), so SdFat toggles only the SD's CS pin. The display already
-// initialised the VSPI bus, so we tell SdFat NOT to re-begin it
-// (USER_SPI_BEGIN) -- re-initialising an active SPI bus corrupts the MISO path.
-// 20 MHz is a safe, verified clock for the card.
+// Mount the SD card via SdFat. On the Waveshare ESP32-S3-Touch-AMOLED-2.16 the
+// microSD slot is on a DEDICATED SPI bus (not shared with the QSPI display):
+// CS=GPIO41, MOSI=GPIO1, MISO=GPIO3, SCK=GPIO2. SdFat therefore drives the bus
+// itself (DEDICATED_SPI) and toggles only the CS pin. 20 MHz is a safe, verified
+// clock for the card.
 bool GyroLogWriter::ensureSd()
 {
     if(_sd.fatType() != 0)
@@ -82,7 +82,7 @@ bool GyroLogWriter::ensureSd()
     }
 
     SPI.begin();
-    if(!_sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(20))))
+    if(!_sd.begin(SdSpiConfig(41, DEDICATED_SPI, SD_SCK_MHZ(20))))
     {
         _sdReady = false;
         _sdStatusMessage = "mount failed (no card / not FAT?)";
@@ -114,7 +114,7 @@ void GyroLogWriter::syncVolume()
 
     _sd.end();
     SPI.begin();
-    _sd.begin(SdSpiConfig(4, SHARED_SPI | USER_SPI_BEGIN, SD_SCK_MHZ(20)));
+    _sd.begin(SdSpiConfig(41, DEDICATED_SPI, SD_SCK_MHZ(20)));
 }
 
 void GyroLogWriter::closeFile()
@@ -126,70 +126,80 @@ void GyroLogWriter::closeFile()
     }
 }
 
-// Configure the sensor for OUTPUT-REGISTER polling at ~1 kHz. We wake the sensor
-// (PWR_MGMT_1: CLKSEL=001 auto-select PLL gyro clock, SLEEP clear) and set the
-// DLPF/SMPLRT_DIV so the output registers refresh at a known rate. We do NOT
-// enable the FIFO -- we read the output registers (0x3B+) directly at 1 kHz from
-// the sampler task. This keeps the I2C load trivial (~14 KB/s) and the "t" index
-// dense by construction, avoiding the FIFO's ~2.3 kHz rate that the I2C bus
-// can't drain losslessly (and which we measured to be ~59% duplicated).
+// Configure the QMI8658 for ~1 kHz sampling. We bring the sensor up on the
+// shared I2C bus, enable the gyroscope at +/-1024 dps and the accelerometer at
+// +/-8 g, both at their highest output data rate (1 kHz). We do NOT use the FIFO
+// -- the sampler task reads the output registers directly at 1 kHz. This keeps
+// the I2C load trivial (~12 KB/s) and the "t" index dense by construction.
 void GyroLogWriter::configurePolling()
 {
-    // Wake the sensor and select the clock source. Per the MPU-6886 datasheet
-    // (DS-000193 v1.1) section 9.6, CLKSEL[2:0] MUST be 001 (auto-select: PLL
-    // gyro clock if ready, else internal oscillator) for full performance.
-    // 0x01 sets CLKSEL=001 and leaves SLEEP/CYCLE/GYRO_STANDBY/TEMP_DIS clear.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000);
-    vTaskDelay(pdMS_TO_TICKS(10)); // let the PLL lock
+    // Bring the QMI8658 up on the shared I2C bus (SDA=15, SCL=14). The board
+    // straps it to the "L" address (0x6B). begin() is idempotent enough that we
+    // can call it on every recording start; if the chip is already up it just
+    // re-reads the WHO_AM_I.
+    if(!_qmi.begin(Wire, kImuAddr, kImuSda, kImuScl))
+    {
+        DEBUG_ERROR("[GYRO] configurePolling(): QMI8658 begin FAILED (addr=0x%02X) -- no IMU data",
+            (unsigned)kImuAddr);
+        _tscale = 0.001f; // keep the timeline sane even without a sensor
+        _fifoConfigured = false;
+        return;
+    }
 
-    // DLPF (CONFIG 0x1A) = 0x01 (44 Hz) and SMPLRT_DIV (0x19) = 0. The exact
-    // sensor ODR doesn't matter for a 1 kHz poll -- we just need the output
-    // registers to hold a fresh sample, which they do at any ODR >= 1 kHz.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x19, 0x00, 400000); // SMPLRT_DIV = 0
-    M5.In_I2C.writeRegister8(kImuAddr, 0x1A, 0x01, 400000); // CONFIG: DLPF = 0x01
-    // Make sure the FIFO is disabled (we're not using it in this mode).
-    M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // USER_CTRL: FIFO_EN = 0
+    // Gyro: +/-1024 dps (the driver's maximum range). The QMI8658's gyro ODR
+    // field is a raw 3-bit value with no 1 kHz member; in 6-DOF mode the combined
+    // output rate follows the accelerometer's ODR, so we set the gyro to its
+    // highest ODR (7) and let the 1 kHz accel ODR below define the 1 kHz grid.
+    _qmi.configGyroscope(SensorQMI8658::GYR_RANGE_1024DPS, (SensorQMI8658::GyroODR)7, SensorQMI8658::LPF_MODE_0);
+    _qmi.enableGyroscope();
+
+    // Accelerometer: +/-8 g, highest ODR (1 kHz), lightest LPF. This 1 kHz ODR is
+    // what drives the combined (gyro+accel) output rate to 1 kHz.
+    _qmi.configAccelerometer(SensorQMI8658::ACC_RANGE_8G, SensorQMI8658::ACC_ODR_1000Hz, SensorQMI8658::LPF_MODE_0);
+    _qmi.enableAccelerometer();
 
     // For the 1 kHz poll mode the output rate is exactly our poll rate (1 kHz),
     // so tscale is simply 1 ms per sample. We set it here (not measured) because
     // the poll cadence -- not the sensor's internal ODR -- defines the sample
     // spacing in the file.
     _tscale = 0.001f; // 1 ms per sample (1 kHz)
-    DEBUG_INFO("[GYRO] configurePolling(): 1 kHz output-register poll mode, tscale=0.001000 s");
+    DEBUG_INFO("[GYRO] configurePolling(): QMI8658 1 kHz mode (gyro 1024dps, accel 8g), tscale=0.001000 s");
     _fifoConfigured = true;
 }
 
-// Read the latest gyro+accel sample from the output registers and append one
-// dense GCSV row to the ring. The output registers (0x3B..0x48) always hold the
-// most recent sample: accel X/Y/Z (6 B), temp (2 B), gyro X/Y/Z (6 B) = 14
-// bytes. We read them in a single I2C transaction and write one row with the
-// running _fifoSeq as the "t" index. Because the sampler calls this exactly once
-// per 1 ms tick, the "t" index is dense (0,1,2,...) and the timeline is accurate.
+// Read the latest gyro+accel sample from the QMI8658 output registers and append
+// one dense GCSV row to the ring. The QMI8658's output registers always hold the
+// most recent sample: accel X/Y/Z (6 B) at 0x3D and gyro X/Y/Z (6 B) at 0x43.
+// We read them via the driver's raw getters (two small I2C reads) and write one
+// row with the running _fifoSeq as the "t" index. Because the sampler calls this
+// exactly once per 1 ms tick, the "t" index is dense (0,1,2,...) and the timeline
+// is accurate.
 uint32_t GyroLogWriter::pollOutputRegisters()
 {
-    uint8_t buf[14];
+    int16_t rawAcc[3];
+    int16_t rawGyr[3];
 
-    // Read 14 bytes starting at 0x3B (the output-register block). Retry a couple
-    // times on an I2C glitch (a single atomic read; a failure means no data was
+    // Read the raw (unscaled) 16-bit samples. Each getter is one short I2C read of
+    // 6 bytes. Retry a couple times on an I2C glitch (a failure means no data was
     // transferred, so a retry re-reads the same latest sample).
-    bool ok = false;
-    for(int attempt = 0; attempt < 3 && !ok; attempt++)
+    bool okA = false, okG = false;
+    for(int attempt = 0; attempt < 3 && (!okA || !okG); attempt++)
     {
-        ok = M5.In_I2C.readRegister(kImuAddr, 0x3B, buf, 14, _i2cHz);
+        if(!okA) okA = _qmi.getAccelRaw(rawAcc);
+        if(!okG) okG = _qmi.getGyroRaw(rawGyr);
     }
-    if(!ok)
+    if(!okA || !okG)
     {
         _i2cFailures++;
         return 0; // this tick's sample is lost (a single gap); the next tick recovers
     }
 
-    int16_t rawAx = (int16_t)((buf[0] << 8) | buf[1]);
-    int16_t rawAy = (int16_t)((buf[2] << 8) | buf[3]);
-    int16_t rawAz = (int16_t)((buf[4] << 8) | buf[5]);
-    // buf[6..7] = temperature (skipped)
-    int16_t rawGx = (int16_t)((buf[8] << 8) | buf[9]);
-    int16_t rawGy = (int16_t)((buf[10] << 8) | buf[11]);
-    int16_t rawGz = (int16_t)((buf[12] << 8) | buf[13]);
+    int16_t rawAx = rawAcc[0];
+    int16_t rawAy = rawAcc[1];
+    int16_t rawAz = rawAcc[2];
+    int16_t rawGx = rawGyr[0];
+    int16_t rawGy = rawGyr[1];
+    int16_t rawGz = rawGyr[2];
 
     char row[64];
     int n = snprintf(row, sizeof(row), "%lu,%ld,%ld,%ld,%ld,%ld,%ld\n",
@@ -326,7 +336,7 @@ void GyroLogWriter::stopWriterTask()
 // The sampler task's main loop. It is PERSISTENT (created once, never deleted)
 // so we don't churn the tight internal heap with a 4 KB alloc/free per recording.
 // When not recording it sleeps; when a recording starts (begin() sets
-// _state=Recording) it wakes and polls the MPU6886 output registers once per 1
+// _state=Recording) it wakes and polls the QMI8658 output registers once per 1
 // ms tick -- a clean, dense 1 kHz sample stream.
 void GyroLogWriter::samplerTaskTrampoline(void* param)
 {
@@ -510,7 +520,7 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         return false;
     }
 
-    // Configure the MPU6886 for 1 kHz output-register polling (sets _tscale = 1
+    // Configure the QMI8658 for 1 kHz output-register polling (sets _tscale = 1
     // ms). Done before the header is written so the tscale is in the file.
     configurePolling();
 
@@ -521,12 +531,12 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     int n = snprintf(header, sizeof(header),
         "GYROFLOW IMU LOG\n"
         "version,1.3\n"
-        "id,m5stack-core2-mpu6886\n"
+        "id,waveshare-s3-amoled-2.16-qmi8658\n"
         "orientation,%s\n"
-        "note,M5Stack Core2 gyro log ~1kHz; start TC %s\n"
+        "note,Waveshare ESP32-S3-Touch-AMOLED-2.16 gyro log ~1kHz; start TC %s\n"
         "fwversion,1.0.0\n"
         "timestamp,0\n"
-        "vendor,m5stack\n"
+        "vendor,waveshare\n"
         "videofilename,%s\n"
         "tscale,%.6f\n"
         "gscale,%.11f\n"
@@ -584,6 +594,21 @@ void GyroLogWriter::poll()
     (void)_state;
 }
 
+// Read one live IMU sample (gyro deg/s, accel g) for the calibration display.
+// Uses the same QMI8658 instance the sampler uses. If the sensor hasn't been
+// brought up yet (configurePolling not run) the getters return false and we
+// report no data.
+bool GyroLogWriter::readImuLive(float& gx, float& gy, float& gz, float& ax, float& ay, float& az)
+{
+    if(!_qmi.isEnableGyroscope() || !_qmi.isEnableAccelerometer())
+        return false;
+    if(!_qmi.getGyroscope(gx, gy, gz))
+        return false;
+    if(!_qmi.getAccelerometer(ax, ay, az))
+        return false;
+    return true;
+}
+
 bool GyroLogWriter::end()
 {
     if(_state != State::Recording)
@@ -602,12 +627,9 @@ bool GyroLogWriter::end()
     // the file and commit the directory entry.
     drainRing();
 
-    // Restore the MPU6886 to a clean state now that we're done sampling: clear
-    // the FIFO-enable and put the clock source back to M5Unified's default (the
-    // 8 MHz RC, PWR_MGMT_1=0x01) so the calibration screen's readImu() and any
-    // later M5Unified use see the sensor the way they expect.
-    M5.In_I2C.writeRegister8(kImuAddr, 0x6A, 0x00, 400000); // USER_CTRL: FIFO_EN = 0
-    M5.In_I2C.writeRegister8(kImuAddr, 0x6B, 0x01, 400000); // clock src = 8 MHz RC (M5Unified default)
+    // Power the QMI8658 down now that we're done sampling, so it stops consuming
+    // I2C bus time and power between clips. The next begin() re-configures it.
+    _qmi.powerDown();
     _fifoConfigured = false;
 
     if(_file.isOpen())

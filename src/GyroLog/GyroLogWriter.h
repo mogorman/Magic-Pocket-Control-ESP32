@@ -4,8 +4,10 @@
 #include <Arduino.h>
 #include <string>
 #include <cstdint>
+#include <Wire.h> // TwoWire (shared I2C bus for the QMI8658)
 #include "Arduino_DebugUtils.h" // DEBUG_INFO / DEBUG_ERROR
 #include "SdFat.h" // Adafruit SdFat (SdFat, FatFile, SdSpiConfig)
+#include "SensorQMI8658.hpp" // Waveshare SensorLib QMI8658 driver
 #include <freertos/FreeRTOS.h> // TaskHandle_t / SemaphoreHandle_t
 #include <freertos/task.h>
 #include <freertos/semphr.h>
@@ -77,16 +79,16 @@ private:
     size_t _tail = 0;
 };
 
-// GCSV (Gyroflow CSV) logger for the M5Stack Core2.
+// GCSV (Gyroflow CSV) logger for the Waveshare ESP32-S3-Touch-AMOLED-2.16.
 //
-// Records the onboard MPU6886 gyro + accelerometer while a clip is being
+// Records the onboard QMI8658 gyro + accelerometer while a clip is being
 // recorded on the connected Blackmagic camera, and writes a sidecar
 // "<clipname>.gcsv" file to the microSD card.
 //
-// The IMU is sampled at 1 kHz: a dedicated sampler task reads the MPU6886's
+// The IMU is sampled at 1 kHz: a dedicated sampler task reads the QMI8658's
 // output registers once per 1 ms tick (pinned to the real-time grid) and appends
 // one dense row to a PSRAM ring buffer; a second (writer) task commits the ring
-// to the card in batches, so a slow SD write never stalls the 1 kHz sampling.
+// to the card in batches, so a slow (multi-ms) SD write never stalls the 1 kHz sampling.
 // The "tscale" field is 1 ms, so Gyroflow's timeline is dense and accurate.
 //
 //   * begin(clipName, ...)  -> on record start: open the GCSV file, write the
@@ -97,9 +99,8 @@ private:
 //   * applySlateName(name)  -> after the real clip name is learned from the
 //                              camera (via playback), rename the file.
 //
-// The SD card shares the VSPI bus with the M5GFX display, so SdFat is told
-// not to re-initialise the bus (USER_SPI_BEGIN) and only toggles the SD's CS
-// pin (GPIO4). See ensureSd().
+// The SD card is on a DEDICATED SPI bus (not shared with the QSPI display), so
+// SdFat drives it directly with its own CS pin (GPIO41). See ensureSd().
 class GyroLogWriter
 {
 public:
@@ -140,6 +141,10 @@ public:
     // No-op: the dedicated sampler task does all the IMU sampling. Kept as a
     // hook so the call site in loop() stays simple.
     void poll();
+
+    // Read one live IMU sample for the calibration display: gyro in deg/s and
+    // accel in g. Returns false if the sensor isn't up (nothing read).
+    bool readImuLive(float& gx, float& gy, float& gz, float& ax, float& ay, float& az);
 
     // Finalise the current log: stop the tasks, drain the ring, close the file,
     // and commit the directory entry to the card. Populates the summary. Returns
@@ -203,16 +208,15 @@ private:
     // Flush + close the open file.
     void closeFile();
 
-    // Configure the MPU6886 for OUTPUT-REGISTER polling at ~1 kHz: wake the
-    // sensor, select the PLL gyro clock, set the DLPF/SMPLRT_DIV, and disable the
-    // FIFO. We read the output registers (0x3B+) directly at 1 kHz from the
-    // sampler task (not the FIFO), which keeps the I2C load trivial and the "t"
-    // index dense by construction.
+    // Configure the QMI8658 for ~1 kHz sampling: enable the gyro at 1024 dps
+    // and the accelerometer at 8 g, both at their highest ODR (1 kHz). We read the
+    // output registers directly at 1 kHz from the sampler task (not the FIFO),
+    // which keeps the I2C load trivial and the "t" index dense by construction.
     void configurePolling();
 
-    // Read the latest gyro+accel sample from the output registers (0x3B..0x48,
-    // 14 bytes) and append one dense GCSV row to the ring, waking the writer.
-    // Returns the number of rows appended (0 or 1). Used by the sampler task.
+    // Read the latest gyro+accel sample from the QMI8658 output registers and
+    // append one dense GCSV row to the ring, waking the writer. Returns the
+    // number of rows appended (0 or 1). Used by the sampler task.
     uint32_t pollOutputRegisters();
 
     // Drain as much of the ring as possible to the file. Runs on the writer task
@@ -294,15 +298,17 @@ private:
     static const char* kNvsNamespace;
     static const char* kNvsKeyOrientation;
 
-    // MPU6886 I2C address (7-bit). The M5 Core2's internal IMU sits at 0x68.
-    static const uint8_t kImuAddr = 0x68;
-    // I2C clock (Hz) for the 1 kHz output-register read. 1 MHz ("fast mode plus")
-    // gives the read ~0.4 ms of headroom under the 1 ms tick. The M5Unified
-    // In_I2C bus is shared with other sensors, but those are only touched on the
-    // main loop (core 1) and the sampler runs on core 1 too at equal priority, so
-    // a faster clock here doesn't disturb them.
-    static const uint32_t kImuI2cHz = 1000000;
-    uint32_t _i2cHz = kImuI2cHz;
+    // QMI8658 I2C address (7-bit). The Waveshare board's IMU is strapped to the
+    // "L" address 0x6B (the SensorLib names it QMI8658_L_SLAVE_ADDRESS).
+    static const uint8_t kImuAddr = 0x6B;
+    // The shared I2C bus pins (SDA/SCL). The QMI8658 driver is handed these so it
+    // talks on the same bus as the touch/PMU/RTC.
+    static const int kImuSda = 15;
+    static const int kImuScl = 14;
+
+    // The QMI8658 driver instance. It is created once (in configurePolling) and
+    // reused for every recording; the sampler task reads its output registers.
+    SensorQMI8658 _qmi;
 };
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
