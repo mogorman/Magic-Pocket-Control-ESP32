@@ -74,8 +74,15 @@ static bool keyAPressed = false;
 static bool keyBPressed = false;
 static bool keyCPressed = false;
 
+// Power-button (KEY5) hold-to-sleep state. powerButtonReleased is set on the
+// first release after boot (in setup()) so a lingering power-on hold can never
+// immediately sleep the device; the 3 s sleep only arms once that is true.
+static bool powerButtonReleased = false;
+
 #include <Arduino.h>
 #include <string.h>
+#include <driver/gpio.h>   // gpio_hold_en / gpio_hold_dis (power-hold across deep sleep)
+#include <esp_sleep.h>       // esp_deep_sleep_start (hold-to-sleep)
 
 #include "Arduino_DebugUtils.h" // Debugging to Serial - https://github.com/arduino-libraries/Arduino_DebugUtils
 
@@ -4178,6 +4185,39 @@ void Screen_Lens(bool forceRefresh = false)
   sprite->pushSprite(0, 0);
 }
 
+// ---- Power management (Waveshare ESP32-S3-Touch-LCD-1.54) ----
+//
+// The center PWR button (KEY5/GPIO5) is the same physical button that powers the
+// ESP32-S3 up. The chip only *stays* powered after the button is released if we
+// drive SYS_EN (BAT_EN/GPIO2) HIGH. So:
+//   * power ON  = hold the PWR button for 3 s (setup() confirms this, then
+//                 asserts SYS_EN and reveals the splash). A shorter press leaves
+//                 SYS_EN low, so on battery the board powers off on release.
+//   * power OFF = hold the PWR button for 3 s while running (powerOff() below).
+// Both the on/off thresholds use the same 3 s hold so the behaviour is symmetric.
+static const uint32_t kPowerHoldMs = 3000;
+
+// Assert the power-hold so the board stays powered after the button is released.
+static void assertPowerHold()
+{
+  gpio_hold_dis((gpio_num_t)BAT_EN); // release any hold left over from deep sleep
+  pinMode(BAT_EN, OUTPUT);
+  digitalWrite(BAT_EN, HIGH);
+}
+
+// Drop the power-hold and enter deep sleep. SYS_EN is held low through the sleep
+// so the board actually powers off (on battery) rather than waking again.
+static void powerOff()
+{
+  display.setBacklight(false);
+  delay(50);
+  digitalWrite(BAT_EN, LOW);
+  gpio_hold_en((gpio_num_t)BAT_EN);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+  delay(200);
+  esp_deep_sleep_start();
+}
+
 void setup() {
 
   Serial.begin(115200);
@@ -4215,8 +4255,61 @@ void setup() {
   // Allow a timeout of 30 seconds for time for the pass key entry. It's slower with buttons
   esp_task_wdt_init(35, true);
 
-  // Splash screen (240x240 asset).
-  tft.pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
+  // ---- Hold-to-power-on gate ----
+  // The PWR button (KEY5) is the same button that powers the board up, so when
+  // we boot from a button press it is still being held right now. We distinguish
+  // two cases by the button state at the *start* of the gate:
+  //   * button HELD now  -> we were woken by the button: keep the screen black
+  //     for 3 s and require the hold to be maintained. If it is held the whole
+  //     time, assert SYS_EN (so the board stays on after release) and reveal the
+  //     splash. If it is released early, leave SYS_EN low so the board powers off
+  //     on release (on battery); the splash is never shown.
+  //   * button NOT held now -> we were powered some other way (USB, or the button
+  //     was already let go before we got here): no gate, just power on normally.
+  const bool buttonHeldAtBoot = (digitalRead(KEY5) == LOW);
+
+  if(buttonHeldAtBoot)
+  {
+    display.setBacklight(false);
+    const unsigned long powerOnStart = millis();
+    while (millis() - powerOnStart < kPowerHoldMs)
+    {
+      if (digitalRead(KEY5) == HIGH)   // released before the 3 s hold completed
+        break;
+      delay(10);
+    }
+    const bool powerOnConfirmed = (digitalRead(KEY5) == LOW); // still held at 3 s?
+
+    if (powerOnConfirmed)
+    {
+      assertPowerHold();
+      display.setBacklight(true);
+      // Splash screen (240x240 asset).
+      tft.pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
+    }
+    else
+    {
+      // Power-on was not confirmed: the board will drop power the moment the
+      // button opens. There is nothing more to do - do not bring up BLE/IMU/SD.
+      Serial.println("Power-on not confirmed (button released early); powering off.");
+      // Keep the backlight off and idle. On battery the hardware cuts power on
+      // release; on USB the board simply sits here until the button is pressed again.
+      for(;;)
+        delay(50);
+    }
+  }
+  else
+  {
+    // Not woken by the button (e.g. USB): power on normally, no hold required.
+    assertPowerHold();
+    display.setBacklight(true);
+    tft.pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
+  }
+
+  // The power-on hold is over. If the button is already released we can arm the
+  // hold-to-sleep immediately; if it's still being held we wait for the first
+  // release (tracked in loop()) so the power-on press can't trigger a sleep.
+  powerButtonReleased = (digitalRead(KEY5) == HIGH);
 
   // Prepare for Bluetooth connections and start scanning for cameras. The Waveshare
   // display is an M5GFX object with the CST816T touch attached to its panel, so the
@@ -4735,6 +4828,33 @@ void loop() {
     {
       DEBUG_DEBUG("Button B (GPIO16) > DOWN");
       btnBPressed = true;
+    }
+  }
+
+  // --- Power button (KEY5) hold-to-sleep ---
+  // A short press is handled by the OneButton click path above (record / down).
+  // A continuous 3 s hold powers the device off (deep sleep). It only arms after
+  // the first release post-boot (so the power-on press can't sleep the device) and
+  // never while a gyro log is being written to the SD card.
+  {
+    static unsigned long powerHoldStart = 0;
+    const bool pwrHeld = (digitalRead(KEY5) == LOW);
+    if(pwrHeld)
+    {
+      if(powerHoldStart == 0)
+        powerHoldStart = millis();
+      if(powerButtonReleased &&
+          (millis() - powerHoldStart >= kPowerHoldMs) &&
+          !gyroLog.isRecording())
+      {
+        DEBUG_INFO("Power button held %lums -> powering off", (unsigned long)(millis() - powerHoldStart));
+        powerOff();
+      }
+    }
+    else
+    {
+      powerHoldStart = 0;
+      powerButtonReleased = true;   // first release arms the hold-to-sleep
     }
   }
 

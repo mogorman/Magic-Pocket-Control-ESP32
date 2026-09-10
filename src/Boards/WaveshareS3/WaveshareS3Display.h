@@ -101,10 +101,18 @@ public:
   //     (M5Stack / M5StickC / ...) and fails for a non-M5 board. init(panel)
   //     instead calls the base LGFX_Device::init_impl directly, which just
   //     brings up the panel we configured above.
+  // The backlight is a plain GPIO (no PWM) on this board. It is controlled
+  // separately from the panel init so the screen can be kept dark (e.g. during
+  // the 3 s hold-to-power-on window) and lit only when the UI is ready.
+  void setBacklight(bool on)
+  {
+    digitalWrite(LCD_BL, on ? HIGH : LOW);
+  }
+
   bool begin()
   {
     pinMode(LCD_BL, OUTPUT);
-    digitalWrite(LCD_BL, HIGH);
+    setBacklight(false);   // start dark; the caller turns it on when ready
     delay(500);
     return init(&_panel);
   }

@@ -45,6 +45,13 @@
 #define KEY4      4
 #define KEY5      5
 
+// ---- Power hold (SYS_EN) ----
+// The center PWR button (KEY5/GPIO5) is the same physical button that powers the
+// ESP32-S3 up. The chip only *stays* powered after the button is released if we
+// drive SYS_EN (GPIO2) HIGH. We assert it only after a confirmed 3 s power-on
+// hold (see setup()), so a short press on battery powers the board back off.
+#define BAT_EN      2
+
 // ---- QMI8658 IMU interrupts (not wired on this board; poll instead) ----
 #define QMI_INT1  -1
 #define QMI_INT2  -1
