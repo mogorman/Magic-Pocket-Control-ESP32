@@ -4180,6 +4180,19 @@ void setup() {
 
   Serial.begin(115200);
 
+  // Earliest-possible I2C probe, before ANY peripheral object is constructed,
+  // to rule out the QSPI display / other objects perturbing the SDA/SCL GPIOs.
+  {
+    Wire.begin(IIC_SDA, IIC_SCL);
+    delay(200);
+    Serial.print("EARLY I2C scan:");
+    for (uint8_t a = 1; a < 127; a++) {
+      Wire.beginTransmission(a);
+      if (Wire.endTransmission() == 0) Serial.printf(" %02X", a);
+    }
+    Serial.println();
+  }
+
   // The QSPI AMOLED (CO5300). The panel + QSPI bus are brought up by the
   // off-screen canvas's begin() below (Arduino_Canvas::begin() calls the
   // parent gfx->begin() internally). Calling gfx->begin() here too would
