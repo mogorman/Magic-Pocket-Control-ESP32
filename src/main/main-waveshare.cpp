@@ -54,6 +54,7 @@
 #include "Boards/WaveshareS3/pin_config.h"
 #include "Arduino_GFX_Library.h" // Arduino_GFX: Arduino_CO5300 + Arduino_ESP32QSPI
 #include <Wire.h>
+#include <XPowersLib.h> // AXP2101 PMU: powers the AMOLED via ALDO3
 #include "ESP32/CST9220/CST9220.h" // CST9220 capacitive touch (CST816T protocol)
 #include "OneButton.h"             // single user button (GPIO18)
 
@@ -4189,6 +4190,19 @@ void setup() {
 
   // Shared I2C bus (touch, PMU, IMU, RTC, audio).
   Wire.begin(IIC_SDA, IIC_SCL);
+
+  // AXP2101 PMU: the AMOLED is powered from the PMU's ALDO3 rail. Without
+  // enabling it the panel has no power and stays dark (no crash). Must run
+  // before the display is brought up. Mirrors the working Waveshare reference.
+  {
+    XPowersPMU pmu(Wire, IIC_SDA, IIC_SCL, AXP2101_SLAVE_ADDRESS);
+    if (pmu.init()) {
+      pmu.enableALDO3(); // display power rail
+      Debug.print(DBG_VERBOSE, "AXP2101: OK, ALDO3 (display) enabled");
+    } else {
+      Debug.print(DBG_VERBOSE, "AXP2101: init FAILED - display may be dark");
+    }
+  }
 
   // Touch (CST9220). begin() resets the panel and attaches the INT interrupt.
   touch.begin(FALLING);
