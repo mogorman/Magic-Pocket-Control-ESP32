@@ -148,11 +148,15 @@ void GyroLogWriter::configurePolling()
         return;
     }
 
-    // Gyro: +/-1024 dps (the driver's maximum range). The QMI8658's gyro ODR
-    // field is a raw 3-bit value with no 1 kHz member; in 6-DOF mode the combined
-    // output rate follows the accelerometer's ODR, so we set the gyro to its
-    // highest ODR (7) and let the 1 kHz accel ODR below define the 1 kHz grid.
-    _qmi.configGyroscope(SensorQMI8658::GYR_RANGE_1024DPS, (SensorQMI8658::GyroODR)7, SensorQMI8658::LPF_MODE_0);
+    // Gyro: +/-1024 dps (the driver's maximum range). The gyro has its OWN ODR,
+    // independent of the accelerometer's, and the GyroODR enum is ordered
+    // HIGHEST-FIRST: index 0 = 7174.4 Hz (max), index 8 = 28 Hz (min). We must use
+    // the HIGHEST (index 0) so the gyro's output register updates far faster than
+    // our 1 kHz read -- if we used a low ODR (e.g. 56 Hz) the gyro output register
+    // would only update ~56x/s and we'd read the same stale gyro value many times in
+    // a row (the "repeated gyro values" bug). At 7174 Hz the register is always
+    // fresh when we read it at 1 kHz.
+    _qmi.configGyroscope(SensorQMI8658::GYR_RANGE_1024DPS, SensorQMI8658::GYR_ODR_7174_4Hz, SensorQMI8658::LPF_MODE_0);
     _qmi.enableGyroscope();
 
     // Accelerometer: +/-8 g, highest ODR (1 kHz), lightest LPF. This 1 kHz ODR is
