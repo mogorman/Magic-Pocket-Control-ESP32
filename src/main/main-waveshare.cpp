@@ -4198,9 +4198,9 @@ void setup() {
     XPowersPMU pmu(Wire, IIC_SDA, IIC_SCL, AXP2101_SLAVE_ADDRESS);
     if (pmu.init()) {
       pmu.enableALDO3(); // display power rail
-      Debug.print(DBG_VERBOSE, "AXP2101: OK, ALDO3 (display) enabled");
+      Serial.printf("AXP2101: OK (chipID=0x%02X), ALDO3 (display) enabled\n", pmu.getChipID());
     } else {
-      Debug.print(DBG_VERBOSE, "AXP2101: init FAILED - display may be dark");
+      Serial.println("AXP2101: init FAILED - display may be dark");
     }
   }
 
