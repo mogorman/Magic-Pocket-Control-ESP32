@@ -4744,6 +4744,9 @@ void loop() {
   {
     keyCPressed = false;
     DEBUG_DEBUG("Button C (GPIO18) > NEXT SCREEN");
+    // Screen order, with Gyro Log first so the list loops back to it:
+    //   GyroLog -> Dashboard -> Recording -> ISO -> Shutter -> WB -> Tint ->
+    //   Codec -> Resolution -> Framerate -> Media -> Lens -> (back to) GyroLog
     switch(connectedScreenIndex)
     {
       case Screens::GyroLog:    connectedScreenIndex = Screens::Dashboard; break;
