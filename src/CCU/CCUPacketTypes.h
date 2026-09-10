@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <Arduino.h>
 #include <vector>
+#include <stdexcept>
 #include "Arduino_DebugUtils.h"
 #include "Camera/ConstantsTypes.h"
 
