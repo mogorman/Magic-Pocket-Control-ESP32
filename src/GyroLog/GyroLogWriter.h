@@ -6,7 +6,8 @@
 #include <cstdint>
 #include <Wire.h> // TwoWire (shared I2C bus for the QMI8658)
 #include "Arduino_DebugUtils.h" // DEBUG_INFO / DEBUG_ERROR
-#include "SdFat.h" // Adafruit SdFat (SdFat, FatFile, SdSpiConfig)
+#include <FS.h>    // Arduino FS/File (used by SD_MMC)
+#include <SD_MMC.h> // ESP32 4-bit SD_MMC (the 1.54's TF slot)
 #include "SensorQMI8658.hpp" // Waveshare SensorLib QMI8658 driver
 #include <freertos/FreeRTOS.h> // TaskHandle_t / SemaphoreHandle_t
 #include <freertos/task.h>
@@ -22,7 +23,7 @@
 class PsramRing
 {
 public:
-    bool begin(FatFile* file, size_t size)
+    bool begin(File* file, size_t size)
     {
         _file = file;
         _size = size;
@@ -72,7 +73,7 @@ public:
     size_t bytesUsed() const { return used(); } // alias matching SdFat RingBuf's name
     size_t freeSpace() const { return _size - used(); }
 private:
-    FatFile* _file = nullptr;
+    File* _file = nullptr;
     uint8_t* _buf = nullptr;
     size_t _size = 0;
     size_t _head = 0;
@@ -244,8 +245,11 @@ private:
     State _state = State::Idle;
     Summary _summary;
 
-    mutable SdFat _sd;
-    FatFile _file;
+    // The 1.54's TF slot is a 4-bit SD_MMC bus (no CS pin). We use the ESP32
+    // core SD_MMC (an fs::SDMMCFS) rather than SdFat, which can't drive MMC.
+    // SD_MMC is a global singleton, so _sd is a reference to it.
+    fs::SDMMCFS& _sd = SD_MMC;
+    File _file;
     bool _sdReady = false;
     std::string _sdStatusMessage = "not mounted yet";
 
@@ -302,9 +306,9 @@ private:
     // "L" address 0x6B (the SensorLib names it QMI8658_L_SLAVE_ADDRESS).
     static const uint8_t kImuAddr = 0x6B;
     // The shared I2C bus pins (SDA/SCL). The QMI8658 driver is handed these so it
-    // talks on the same bus as the touch/PMU/RTC.
-    static const int kImuSda = 15;
-    static const int kImuScl = 14;
+    // talks on the same bus as the touch and audio (the 1.54's I2C is 42/41).
+    static const int kImuSda = 42;
+    static const int kImuScl = 41;
 
     // The QMI8658 driver instance. It is created once (in configurePolling) and
     // reused for every recording; the sampler task reads its output registers.

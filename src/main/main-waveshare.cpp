@@ -1,5 +1,5 @@
 #define USING_TFT_ESPI 0          // Not using the TFT_eSPI graphics library <-- must include this in every main file, 0 = not using, 1 = using
-#define USING_M5GFX 0             // Display is driven via Arduino_GFX (CO5300) directly, not the M5GFX screen-security handler
+#define USING_M5GFX 1             // Display is driven via M5GFX (ST7789 240x240) in standalone mode
 #define USING_M5_BUTTONS 0        // Not using the 3 M5 buttons (this board has three user buttons + touch)
 
 #define OUTPUT_CAMERA_SETTINGS 1  // 1 = Outputs camera settings through serial (so other applications can read them)
@@ -52,26 +52,24 @@
 */
 
 #include "Boards/WaveshareS3/pin_config.h"
-#include "Arduino_GFX_Library.h" // Arduino_GFX: Arduino_CO5300 + Arduino_ESP32QSPI
+#include "Boards/WaveshareS3/WaveshareS3Display.h" // M5GFX ST7789 240x240 + CST816T touch
 #include <Wire.h>
-#include <XPowersLib.h> // AXP2101 PMU: powers the AMOLED via ALDO3
-#include "ESP32/CST9220/CST9220.h" // CST9220 capacitive touch (CST816T protocol)
-#include "OneButton.h"             // single user button (GPIO18)
+#include "ESP32/CST9220/CST9220.h" // CST816T capacitive touch (standalone I2C reader)
+#include "OneButton.h"             // user buttons
 
-// The 480x480 AMOLED (CO5300) driven over QSPI. `tft` is an alias for the
-// display object so the (board-agnostic) screen-drawing code below can call
-// tft.fillScreen / tft.drawString / tft.pushImage unchanged.
-static Arduino_DataBus *bus;
-static Arduino_CO5300 *gfx;
-#define tft (*gfx)
+// The 1.54" ST7789 240x240 LCD, driven by M5GFX in standalone mode (no
+// M5Unified). `tft` is the display object so the (board-agnostic) screen code
+// below can call tft.fillScreen / tft.pushImage / tft.getTouch unchanged.
+static WaveshareS3Display display;
+#define tft (display)
 
-// Touch + three user buttons (all active-high, pulled up). OneButton 2.6.x has
-// no wasPressed(); we use attachClick() to set a one-shot flag that the main loop
-// consumes (and clears) each iteration.
+// Touch (CST816T @0x15 on the shared I2C bus) + three user buttons (active-low,
+// pulled up). OneButton 2.6.x has no wasPressed(); we use attachClick() to set a
+// one-shot flag that the main loop consumes (and clears) each iteration.
 static CST9220 touch(IIC_SDA, IIC_SCL, TP_RST, TP_INT);
-static OneButton keyA(KEY0, true);  // GPIO0  -> up / select
-static OneButton keyB(KEY16, true); // GPIO16 -> record (Dashboard/Recording) / down
-static OneButton keyC(KEY3, true);  // GPIO18 -> next / previous screen
+static OneButton keyA(KEY0, true);  // GPIO0 (minus) -> up / select
+static OneButton keyB(KEY5, true);  // GPIO5 (power) -> record (Dashboard/Recording) / down
+static OneButton keyC(KEY4, true);  // GPIO4 (plus)  -> next / previous screen
 static bool keyAPressed = false;
 static bool keyBPressed = false;
 static bool keyCPressed = false;
@@ -106,141 +104,144 @@ static bool keyCPressed = false;
 #include "Fonts/AgencyFB_Bold9pt7b.h" // Agency FB small for above buttons
 #include "Fonts/AgencyFB_Regular9pt7b.h" // Agency FB small-medium for above buttons
 
-// The screen code uses TFT_* colour names (from the old M5GFX/TFT_eSPI headers).
-// Arduino_GFX has no such names, so we define the 16-bit (RGB565) values here.
-// These match the standard Adafruit TFT_eSPI colour constants.
-#define TFT_BLACK       0x0000
-#define TFT_WHITE       0xFFFF
-#define TFT_RED         0xF800
-#define TFT_GREEN       0x07E0
-#define TFT_BLUE        0x001F
-#define TFT_CYAN        0x07FF
-#define TFT_MAGENTA     0xF81F
-#define TFT_YELLOW      0xFFE0
-#define TFT_ORANGE      0xFD20
-#define TFT_PURPLE      0x9800
-#define TFT_BROWN       0xA500
-#define TFT_DARKGREY    0x7BEF
-#define TFT_LIGHTGREY   0xCFD7
-#define TFT_DARKGREEN   0x03E0
-#define TFT_DARKCYAN    0x03FF
-#define TFT_MAROON      0x7800
+// The screen code uses TFT_* colour names; M5GFX provides these (RGB565) via its
+// colour namespace, so no local redefinition is needed here.
 
 // ---- Sprite shim -------------------------------------------------------------
 // The board-agnostic screen code was written against M5GFX's `LGFX_Sprite`
 // (createSprite / pushImage / drawString / drawCentreString / fillSmoothRoundRect
-// / pushSprite ...). Arduino_GFX has no such sprite class, so this thin shim
-// provides the same method names on top of an off-screen `Arduino_GFX` buffer
-// (16-bit, PSRAM) and blits it to the panel with pushSprite(). The screen code
-// below is left untouched and just calls sprite->... as before.
+// / pushSprite ...). This thin shim keeps those exact method names but backs them
+// with a real M5GFX `LGFX_Sprite` (16-bit, PSRAM) instead of the Arduino_GFX
+// canvas the 2.16 build used. The screen code below is left untouched and just
+// calls sprite->... as before.
 class SpriteShim
 {
 public:
-    // Arduino_Canvas is Arduino_GFX's off-screen buffer: it draws into a
-    // 16-bit framebuffer and flush() blits it to the panel (the `output`).
-    Arduino_Canvas* _gfx = nullptr;
+    LGFX_Sprite* _gfx = nullptr;
     int _w = 0, _h = 0;
-    const GFXfont* _font = nullptr;
-    uint16_t _textColor = 0xFFFF;
-    uint16_t _textBg = 0x0000;
+    const lgfx::IFont* _font = nullptr;
 
     bool createSprite(int w, int h)
     {
         if(_gfx == nullptr)
-            _gfx = new Arduino_Canvas(w, h, gfx);
+            _gfx = new LGFX_Sprite(&tft);
+        _gfx->createSprite(w, h);
+        _gfx->setPsram(true);
+        _gfx->setColorDepth(16);
+        _gfx->setSwapBytes(true);
         _w = w; _h = h;
         return _gfx != nullptr;
     }
-    // Allocate the canvas framebuffer (and bring up the panel output).
-    bool begin() { return _gfx ? _gfx->begin() : false; }
-    void setPsram(bool) {}
-    void setColorDepth(int) {}
-    void setSwapBytes(bool) {}
-    void setFont(const GFXfont* f) { _font = f; }
-    void setTextColor(uint16_t c) { _textColor = c; }
+    bool begin() { return _gfx != nullptr; }
+    void setPsram(bool b) { if(_gfx) _gfx->setPsram(b); }
+    void setColorDepth(int d) { if(_gfx) _gfx->setColorDepth(d); }
+    void setSwapBytes(bool b) { if(_gfx) _gfx->setSwapBytes(b); }
+    void setFont(const lgfx::IFont* f) { _font = f; }
+    void setTextColor(uint16_t c) { if(_gfx) _gfx->setTextColor(c); }
     void setTextSize(int) {}
-    void textbgcolor(uint16_t c) { _textBg = c; }
+    void textbgcolor(uint16_t) {}
 
-    void fillScreen(uint16_t c) { _gfx->fillScreen(c); }
-    void fillSprite(uint16_t c) { _gfx->fillScreen(c); }
-    void fillRect(int x, int y, int w, int h, uint16_t c) { _gfx->fillRect(x, y, w, h, c); }
-    void fillRoundRect(int x, int y, int w, int h, int r, uint16_t c) { _gfx->fillRoundRect(x, y, w, h, r, c); }
-    void fillSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t c) { _gfx->fillRoundRect(x, y, w, h, r, c); }
-    void fillSmoothCircle(int x, int y, int r, uint16_t c) { _gfx->fillCircle(x, y, r, c); }
-    void fillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, uint16_t c) { _gfx->fillTriangle(x1, y1, x2, y2, x3, y3, c); }
-    void drawRect(int x, int y, int w, int h, uint16_t c) { _gfx->drawRect(x, y, w, h, c); }
-    void drawRoundRect(int x, int y, int w, int h, int r, uint16_t c) { _gfx->drawRoundRect(x, y, w, h, r, c); }
+    void fillScreen(uint16_t c) { if(_gfx) _gfx->fillScreen(c); }
+    void fillSprite(uint16_t c) { if(_gfx) _gfx->fillSprite(c); }
+    void fillRect(int x, int y, int w, int h, uint16_t c) { if(_gfx) _gfx->fillRect(x, y, w, h, c); }
+    void fillRoundRect(int x, int y, int w, int h, int r, uint16_t c) { if(_gfx) _gfx->fillRoundRect(x, y, w, h, r, c); }
+    void fillSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t c) { if(_gfx) _gfx->fillSmoothRoundRect(x, y, w, h, r, c); }
+    void fillSmoothCircle(int x, int y, int r, uint16_t c) { if(_gfx) _gfx->fillSmoothCircle(x, y, r, c); }
+    void fillTriangle(int x1, int y1, int x2, int y2, int x3, int y3, uint16_t c) { if(_gfx) _gfx->fillTriangle(x1, y1, x2, y2, x3, y3, c); }
+    void drawRect(int x, int y, int w, int h, uint16_t c) { if(_gfx) _gfx->drawRect(x, y, w, h, c); }
+    void drawRoundRect(int x, int y, int w, int h, int r, uint16_t c) { if(_gfx) _gfx->drawRoundRect(x, y, w, h, r, c); }
     // 5-arg form (no explicit radius arg order): some screens call drawRoundRect(x,y,w,h,color).
-    void drawRoundRect(int x, int y, int w, int h, uint16_t c) { _gfx->drawRect(x, y, w, h, c); }
-    void drawSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t c) { _gfx->drawRoundRect(x, y, w, h, r, c); }
-    void drawCircle(int x, int y, int r, uint16_t c) { _gfx->drawCircle(x, y, r, c); }
+    void drawRoundRect(int x, int y, int w, int h, uint16_t c) { if(_gfx) _gfx->drawRect(x, y, w, h, c); }
+    void drawSmoothRoundRect(int x, int y, int w, int h, int r, uint16_t c) { if(_gfx) _gfx->drawRoundRect(x, y, w, h, r, c); }
+    void drawCircle(int x, int y, int r, uint16_t c) { if(_gfx) _gfx->drawCircle(x, y, r, c); }
 
-    void pushImage(int x, int y, int w, int h, const uint16_t* data) { _gfx->draw16bitRGBBitmap(x, y, const_cast<uint16_t*>(data), w, h); }
+    // The screen code is a 320x240 layout; the 1.54 panel is 240x240. We keep the
+    // off-screen sprite at the native 320x240 and downscale it to 240x240 here
+    // (a 0.75x horizontal scale), so the whole UI fits without touching the 450
+    // draw call-sites. `pushImage` is used for the splash (already 240x240), so it
+    // is NOT scaled.
+    void pushImage(int x, int y, int w, int h, const uint16_t* data) { if(_gfx) _gfx->pushImage(x, y, w, h, data); }
 
-    void drawString(const char* s, int x, int y, const GFXfont* f = nullptr)
+    void drawString(const char* s, int x, int y, const lgfx::IFont* f = nullptr)
     {
-        const GFXfont* use = f ? f : _font;
-        _gfx->setFont(use);
-        _gfx->setTextColor(_textColor, _textBg);
-        _gfx->setCursor(x, y);
-        _gfx->print(s);
+        const lgfx::IFont* use = f ? f : _font;
+        if(_gfx) { _gfx->setFont(use); _gfx->setCursor(x, y); _gfx->print(s); }
     }
-    // The screen code sometimes passes an Arduino String (M5GFX's LGFX_Sprite
-    // accepted one); bridge it to the const char* overload.
-    void drawString(const String& s, int x, int y, const GFXfont* f = nullptr)
+    void drawString(const String& s, int x, int y, const lgfx::IFont* f = nullptr)
     {
         drawString(s.c_str(), x, y, f);
     }
-    void drawCentreString(const char* s, int cx, int y, const GFXfont* f = nullptr)
+    void drawCentreString(const char* s, int cx, int y, const lgfx::IFont* f = nullptr)
     {
-        const GFXfont* use = f ? f : _font;
-        _gfx->setFont(use);
-        int16_t x1, y1; uint16_t w, h;
-        _gfx->getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
-        drawString(s, cx - w / 2, y, use);
+        if(_gfx) _gfx->drawCentreString(s, cx, y, f ? f : _font);
     }
-    void drawCentreString(const String& s, int cx, int y, const GFXfont* f = nullptr)
+    void drawCentreString(const String& s, int cx, int y, const lgfx::IFont* f = nullptr)
     {
         drawCentreString(s.c_str(), cx, y, f);
     }
     // US spelling used by a handful of call sites.
-    void drawCenterString(const char* s, int cx, int y, const GFXfont* f = nullptr)
+    void drawCenterString(const char* s, int cx, int y, const lgfx::IFont* f = nullptr)
     {
         drawCentreString(s, cx, y, f);
     }
-    void drawCenterString(const String& s, int cx, int y, const GFXfont* f = nullptr)
+    void drawCenterString(const String& s, int cx, int y, const lgfx::IFont* f = nullptr)
     {
         drawCentreString(s.c_str(), cx, y, f);
     }
-    void drawRightString(const char* s, int rightX, int y, const GFXfont* f = nullptr)
+    void drawRightString(const char* s, int rightX, int y, const lgfx::IFont* f = nullptr)
     {
-        const GFXfont* use = f ? f : _font;
-        _gfx->setFont(use);
-        int16_t x1, y1; uint16_t w, h;
-        _gfx->getTextBounds(s, 0, 0, &x1, &y1, &w, &h);
-        drawString(s, rightX - w, y, use);
+        if(_gfx) _gfx->drawRightString(s, rightX, y, f ? f : _font);
     }
-    // Some call sites build the right-aligned text with `...c_str() + String(...)`,
-    // which yields a temporary String rather than a const char*.
-    void drawRightString(const String& s, int rightX, int y, const GFXfont* f = nullptr)
+    void drawRightString(const String& s, int rightX, int y, const lgfx::IFont* f = nullptr)
     {
         drawRightString(s.c_str(), rightX, y, f);
     }
 
-    void pushSprite(int x, int y) { tft.draw16bitRGBBitmap(x, y, _gfx->getFramebuffer(), _w, _h); }
+    // Blit the off-screen sprite to the panel. The sprite is 320x240 (the native
+    // layout); the panel is 240x240, so we downscale horizontally by 0.75 (nearest
+    // neighbour) into a 240x240 staging buffer and blit that. The vertical axis is
+    // 1:1 (both 240). This is the single place that applies the 320->240 fit.
+    void pushSprite(int x, int y)
+    {
+        if(!_gfx) return;
+        const uint16_t* fb = (const uint16_t*)_gfx->getBuffer();
+        if(!fb) { _gfx->pushSprite(x, y); return; }
+        const int sw = _gfx->width();   // 320 (native layout)
+        const int sh = _gfx->height();  // 240
+        const int dw = 240;             // panel width
+        const int dh = 240;            // panel height
+        if(sw == dw && sh == dh)
+        {
+            _gfx->pushSprite(x, y);
+            return;
+        }
+        static uint16_t* stage = nullptr;
+        if(!stage) stage = (uint16_t*)ps_malloc((size_t)dw * dh * 2);
+        if(!stage) { _gfx->pushSprite(x, y); return; }
+        for(int py = 0; py < dh; py++)
+        {
+            int sy = (py * sh) / dh;
+            const uint16_t* src = fb + (size_t)sy * sw;
+            uint16_t* dst = stage + (size_t)py * dw;
+            for(int px = 0; px < dw; px++)
+                dst[px] = src[(px * sw) / dw];
+        }
+        tft.pushImage(x, y, dw, dh, stage);
+    }
 };
 // ---------------------------------------------------------------------------
 
-static SpriteShim *sprite; // off-screen 480x480 16-bit buffer (PSRAM) + LGFX-style API
+static SpriteShim *sprite; // off-screen 320x240 16-bit buffer (PSRAM) + LGFX-style API
 
-// Screen width and height (480x480 AMOLED)
-#define IWIDTH 480
-#define IHEIGHT 480
+// Screen width and height (240x240 ST7789 panel).
+#define IWIDTH 240
+#define IHEIGHT 240
 
-// Sprite width and height. This board has 8MB of PSRAM, so the off-screen buffer
-// is a full 480x480 16-bit (16bpp) surface -- no 8bpp compromise needed.
-#define IWIDTH_SPRITE 480
-#define IHEIGHT_SPRITE 480
+// The off-screen sprite is the *native* 320x240 layout (the size the screen code
+// was written for). pushSprite() downscales it to the 240x240 panel (0.75x on the
+// horizontal axis), so the whole UI fits without touching the draw call-sites.
+#define IWIDTH_SPRITE 320
+#define IHEIGHT_SPRITE 240
 #define BPP_SPRITE 16
 
 // Images
@@ -535,8 +536,9 @@ void Screen_NoConnection()
 
   connectedScreenIndex = Screens::NoConnection;
 
-  // Background on the sprite (overlay the part of the background that covers the sprite)
-  sprite->pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
+  // Background on the sprite. The splash is shown full-size at boot (tft.pushImage
+  // in setup); here we just clear the 320x240 sprite to black as the screen base.
+  sprite->fillSprite(TFT_BLACK);
 
   // Black background for text and Bluetooth Logo
   sprite->fillRect(0, 3, IWIDTH, 51, TFT_BLACK);
@@ -4180,79 +4182,18 @@ void setup() {
 
   Serial.begin(115200);
 
-  // Earliest-possible I2C probe, before ANY peripheral object is constructed,
-  // to rule out the QSPI display / other objects perturbing the SDA/SCL GPIOs.
-  {
-    // Raw GPIO test: can we drive SDA(15)/SCL(14) at all? If these read back
-    // as controllable, the GPIOs are alive and the I2C *slaves* are the problem.
-    pinMode(IIC_SDA, OUTPUT); pinMode(IIC_SCL, OUTPUT);
-    digitalWrite(IIC_SDA, HIGH); digitalWrite(IIC_SCL, HIGH);
-    pinMode(IIC_SDA, INPUT_PULLUP); pinMode(IIC_SCL, INPUT_PULLUP);
-    delay(10);
-    Serial.printf("GPIO SDA(15)=%d SCL(14)=%d (expect 1,1 with pull-ups)\n",
-                  digitalRead(IIC_SDA), digitalRead(IIC_SCL));
-    Wire.begin(IIC_SDA, IIC_SCL);
-    delay(200);
-    Serial.print("EARLY I2C scan:");
-    for (uint8_t a = 1; a < 127; a++) {
-      Wire.beginTransmission(a);
-      if (Wire.endTransmission() == 0) Serial.printf(" %02X", a);
-    }
-    Serial.println();
-  }
-
-  // The QSPI AMOLED (CO5300). The panel + QSPI bus are brought up by the
-  // off-screen canvas's begin() below (Arduino_Canvas::begin() calls the
-  // parent gfx->begin() internally). Calling gfx->begin() here too would
-  // double-init the SPI host (spi_bus_initialize) -> ESP_ERR_INVALID_STATE
-  // abort, so we do NOT call it separately.
-  bus = new Arduino_ESP32QSPI(
-    LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-  gfx = new Arduino_CO5300(
-    bus, LCD_RESET, 0 /* rotation */, false /* ips */, LCD_WIDTH, LCD_HEIGHT, 0, 0, 0, 0);
-
-  // Shared I2C bus (touch, PMU, IMU, RTC, audio).
+  // Shared I2C bus (touch, IMU, audio). Brought up before the display so the
+  // CST816T touch and QMI8658 IMU can share it.
   Wire.begin(IIC_SDA, IIC_SCL);
   Wire.setClock(400000);
 
-  // AXP2101 PMU: the AMOLED is powered from the PMU's ALDO3 rail. Without
-  // enabling it the panel has no power and stays dark (no crash). Must run
-  // before the display is brought up. Mirrors the working Waveshare reference.
-  {
-    // Diagnostic: scan the I2C bus and read the AXP chip-ID register (0x03)
-    // directly, so we can tell *why* init fails (no device vs wrong ID).
-    {
-      delay(100); // let the bus settle after Wire.begin
-      Serial.print("I2C scan:");
-      for (uint8_t a = 1; a < 127; a++) {
-        Wire.beginTransmission(a);
-        if (Wire.endTransmission() == 0) Serial.printf(" %02X", a);
-      }
-      Serial.println();
-      Wire.beginTransmission(AXP2101_SLAVE_ADDRESS);
-      Wire.write(0x03);
-      Wire.endTransmission(false);
-      Wire.requestFrom(AXP2101_SLAVE_ADDRESS, 1);
-      uint8_t ic = Wire.available() ? Wire.read() : 0;
-      Serial.printf("AXP2101 0x03 read = 0x%02X (expect 0x4A)\n", ic);
-      // Also probe the QMI8658 IMU (0x6B) WHO_AM_I (0x75) -> 0x05/0x95.
-      Wire.beginTransmission(0x6B);
-      Wire.write(0x75);
-      Wire.endTransmission(false);
-      Wire.requestFrom(0x6B, 1);
-      uint8_t qmi = Wire.available() ? Wire.read() : 0;
-      Serial.printf("QMI8658 0x75 read = 0x%02X (expect 0x05/0x95)\n", qmi);
-    }
-    XPowersPMU pmu(Wire, IIC_SDA, IIC_SCL, AXP2101_SLAVE_ADDRESS);
-    if (pmu.init()) {
-      pmu.enableALDO3(); // display power rail
-      Serial.printf("AXP2101: OK (chipID=0x%02X), ALDO3 (display) enabled\n", pmu.getChipID());
-    } else {
-      Serial.println("AXP2101: init FAILED - display may be dark");
-    }
-  }
+  // Display: ST7789 240x240 over SPI, via M5GFX in standalone mode (no
+  // M5Unified). begin() brings up the SPI bus + panel and turns on the
+  // backlight (GPIO46).
+  if(!display.begin())
+    Serial.println("WaveshareS3Display: begin() FAILED - display may be dark");
 
-  // Touch (CST9220). begin() resets the panel and attaches the INT interrupt.
+  // Touch (CST816T). begin() resets the controller and attaches the INT interrupt.
   touch.begin(FALLING);
 
   // User buttons: a click sets a one-shot flag consumed (and cleared) in the loop.
@@ -4260,15 +4201,10 @@ void setup() {
   keyB.attachClick([]() { keyBPressed = true; });
   keyC.attachClick([]() { keyCPressed = true; });
 
-  // Off-screen 480x480 16-bit buffer (PSRAM) that the screen code draws into.
-  // begin() brings up the QSPI bus + panel (single init; do not also call gfx->begin()).
+  // Off-screen 240x240 16-bit buffer (PSRAM) that the screen code draws into.
   sprite = new SpriteShim();
   sprite->createSprite(IWIDTH_SPRITE, IHEIGHT_SPRITE);
   sprite->begin();
-  // Now that the bus is up: set brightness and the display orientation/scanning
-  // (0x36=0xA0, straight from the Waveshare examples).
-  gfx->setBrightness(200);
-  bus->writeC8D8(0x36, 0xA0);
   sprite->setFont(&Lato_Regular11pt7b);
   sprite->setTextColor(TFT_WHITE);
 
@@ -4279,12 +4215,12 @@ void setup() {
   // Allow a timeout of 30 seconds for time for the pass key entry. It's slower with buttons
   esp_task_wdt_init(35, true);
 
-  // Splash screen (upscaled 480x480 asset, centred on the panel).
-  tft.draw16bitRGBBitmap(0, 0, MPCSplash_Waveshare, IWIDTH, IHEIGHT);
+  // Splash screen (240x240 asset).
+  tft.pushImage(0, 0, IWIDTH, IHEIGHT, MPCSplash_Waveshare);
 
   // Prepare for Bluetooth connections and start scanning for cameras. The Waveshare
-  // display is an Arduino_GFX object (not M5GFX), so the on-screen pass-key handler
-  // (which is M5GFX-specific) doesn't apply; we use the serial pass-key entry path.
+  // display is an M5GFX object, but we use the serial pass-key entry path (the
+  // on-screen M5GFX pass-key handler is not wired up on this board).
   cameraConnection.initialise(); // Serial security pass key
 
   // When the connected camera's recording state changes, start/stop the gyro

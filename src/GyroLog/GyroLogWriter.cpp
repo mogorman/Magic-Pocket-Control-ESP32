@@ -67,40 +67,44 @@ static std::string sanitiseClipName(const std::string& name)
     return out;
 }
 
-// Mount the SD card via SdFat. On the Waveshare ESP32-S3-Touch-AMOLED-2.16 the
-// microSD slot is on a DEDICATED SPI bus (not shared with the QSPI display):
-// CS=GPIO41, MOSI=GPIO1, MISO=GPIO3, SCK=GPIO2. SdFat therefore drives the bus
-// itself (DEDICATED_SPI) and toggles only the CS pin. 20 MHz is a safe, verified
-// clock for the card.
+// Mount the SD card via the ESP32 core SD_MMC. On the Waveshare
+// ESP32-S3-Touch-LCD-1.54 the TF slot is a 4-bit SD_MMC bus (no CS pin):
+// clk=16, cmd=15, d0=17, d1=18, d2=13, d3=14.
 bool GyroLogWriter::ensureSd()
 {
-    if(_sd.fatType() != 0)
+    if(_sdReady)
     {
-        _sdReady = true;
         _sdStatusMessage = "ready";
         return true;
     }
 
-    SPI.begin();
-    if(!_sd.begin(SdSpiConfig(41, DEDICATED_SPI, SD_SCK_MHZ(20))))
+    // The 1.54's TF slot is a 4-bit SD_MMC bus (no CS pin).
+    if(!_sd.setPins(16, 15, 17, 18, 13, 14))
     {
         _sdReady = false;
-        _sdStatusMessage = "mount failed (no card / not FAT?)";
-        DEBUG_INFO("[GYRO] ensureSd: SdFat begin FAILED cardType=%d sdErrorCode=0x%02X",
-            (int)_sd.card()->type(), (unsigned)_sd.sdErrorCode());
+        _sdStatusMessage = "SD_MMC setPins failed";
+        DEBUG_INFO("[GYRO] ensureSd: SD_MMC setPins FAILED");
         return false;
     }
 
-    if(_sd.fatType() != 0)
+    if(!_sd.begin())
     {
-        _sdReady = true;
-        _sdStatusMessage = "ready";
-        return true;
+        _sdReady = false;
+        _sdStatusMessage = "mount failed (no card?)";
+        DEBUG_INFO("[GYRO] ensureSd: SD_MMC begin FAILED cardType=%d", (int)_sd.cardType());
+        return false;
     }
 
-    _sdReady = false;
-    _sdStatusMessage = "no card detected";
-    return false;
+    if(_sd.cardType() == CARD_UNKNOWN)
+    {
+        _sdReady = false;
+        _sdStatusMessage = "no card detected";
+        return false;
+    }
+
+    _sdReady = true;
+    _sdStatusMessage = "ready";
+    return true;
 }
 
 // Force the FAT volume's cached directory entries (file sizes + cluster
@@ -109,19 +113,18 @@ bool GyroLogWriter::ensureSd()
 // RAM cache that FatFs otherwise only commits on unmount.
 void GyroLogWriter::syncVolume()
 {
-    if(_sd.fatType() == 0)
+    if(!_sdReady)
         return; // not mounted
 
     _sd.end();
-    SPI.begin();
-    _sd.begin(SdSpiConfig(41, DEDICATED_SPI, SD_SCK_MHZ(20)));
+    _sd.begin();
 }
 
 void GyroLogWriter::closeFile()
 {
-    if(_file.isOpen())
+    if(_file)
     {
-        _file.sync();
+        _file.flush();
         _file.close();
     }
 }
@@ -226,7 +229,7 @@ uint32_t GyroLogWriter::pollOutputRegisters()
 // are never blocked by a multi-ms card write.
 void GyroLogWriter::drainRing()
 {
-    if(!_file.isOpen())
+    if(!_file)
         return;
 
     size_t used;
@@ -502,10 +505,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
     snprintf(path, sizeof(path), "/%s.gcsv", _startedName.c_str());
     _gcsvPath = path;
 
-    // Open the GCSV file with SdFat. O_CREAT|O_TRUNC creates/truncates it.
-    if(!_file.open(_gcsvPath.c_str(), O_WRONLY | O_CREAT | O_TRUNC))
+    // Open the GCSV file for writing. Mode "w" creates/truncates it.
+    _file = SD_MMC.open(_gcsvPath.c_str(), "w");
+    if(!_file)
     {
-        DEBUG_INFO("[GYRO] begin(): open FAILED for '%s' (err=%d)", _gcsvPath.c_str(), (int)_file.getError());
+        DEBUG_INFO("[GYRO] begin(): open FAILED for '%s'", _gcsvPath.c_str());
         return false;
     }
 
@@ -632,10 +636,10 @@ bool GyroLogWriter::end()
     _qmi.powerDown();
     _fifoConfigured = false;
 
-    if(_file.isOpen())
+    if(_file)
     {
-        _finalFileSizeBytes = _file.fileSize();
-        closeFile(); // sync() + close()
+        _finalFileSizeBytes = _file.size();
+        closeFile(); // flush() + close()
         syncVolume();
     }
 
@@ -646,14 +650,11 @@ bool GyroLogWriter::end()
     _summary.videoFileName = _videoFileName;
     _summary.durationMs = (uint32_t)((double)_fifoSeq * _tscale * 1000.0);
     _summary.fileSizeBytes = _finalFileSizeBytes;
-    // Total space from the volume's cluster count (cheap: read from the FAT boot
-    // sector, no FAT walk). We deliberately do NOT call freeClusterCount() here:
-    // on a large card it walks the entire FAT (tens of seconds) and would stall
-    // the stop path. Free space is refreshed lazily via refreshFreeSpace().
-    if(_sd.fatType() != 0)
+    // Total space from the card size (cheap). Free space is refreshed lazily via
+    // refreshFreeSpace().
+    if(_sdReady)
     {
-        uint32_t bpc = _sd.bytesPerCluster();
-        _summary.totalBytes = (uint64_t)_sd.clusterCount() * bpc;
+        _summary.totalBytes = _sd.totalBytes();
         _summary.freeBytes = 0;
     }
 
@@ -665,17 +666,16 @@ bool GyroLogWriter::end()
 
 void GyroLogWriter::refreshFreeSpace()
 {
-    if(_sd.fatType() == 0)
+    if(!_sdReady)
         return; // not mounted
 
-    uint32_t bpc = _sd.bytesPerCluster();
     uint32_t tFree = micros();
-    int32_t freeClusters = _sd.freeClusterCount();
+    uint64_t freeBytes = _sd.totalBytes() - _sd.usedBytes();
     uint32_t freeMs = (uint32_t)((micros() - tFree) / 1000UL);
-    if(freeClusters > 0)
-        _summary.freeBytes = (uint64_t)freeClusters * bpc;
-    DEBUG_INFO("[GYRO] refreshFreeSpace: freeClusters=%ld, took %lu ms",
-      (long)freeClusters, (unsigned long)freeMs);
+    if(freeBytes > 0)
+        _summary.freeBytes = freeBytes;
+    DEBUG_INFO("[GYRO] refreshFreeSpace: freeBytes=%llu, took %lu ms",
+      (unsigned long long)freeBytes, (unsigned long)freeMs);
 }
 
 void GyroLogWriter::applySlateName(const std::string& slateName, const std::string& extension)
@@ -767,10 +767,10 @@ bool GyroLogWriter::fileExists(const std::string& path) const
 
 uint64_t GyroLogWriter::fileSize(const std::string& path) const
 {
-    FatFile f;
-    if(!f.open(path.c_str(), O_RDONLY))
+    File f = SD_MMC.open(path.c_str(), "r");
+    if(!f)
         return 0;
-    uint64_t size = f.fileSize();
+    uint64_t size = f.size();
     f.close();
     return size;
 }
@@ -780,8 +780,8 @@ uint64_t GyroLogWriter::fileSize(const std::string& path) const
 // letter, so this cleanly separates the sample rows from the header.
 long GyroLogWriter::countSamplesInFile(const std::string& path)
 {
-    FatFile f;
-    if(!f.open(path.c_str(), O_RDONLY))
+    File f = SD_MMC.open(path.c_str(), "r");
+    if(!f)
         return -1;
 
     long count = 0;
@@ -812,8 +812,8 @@ long GyroLogWriter::countSamplesInFile(const std::string& path)
 // clean file has first=0, last=N-1, maxGap=1, and no backwards steps.
 void GyroLogWriter::analyzeTIndex(const std::string& path)
 {
-    FatFile f;
-    if(!f.open(path.c_str(), O_RDONLY))
+    File f = SD_MMC.open(path.c_str(), "r");
+    if(!f)
     {
         DEBUG_INFO("[GYRO] analyzeTIndex('%s'): could not open", path.c_str());
         return;
