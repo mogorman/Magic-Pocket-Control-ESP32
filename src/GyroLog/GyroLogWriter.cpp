@@ -548,6 +548,11 @@ bool GyroLogWriter::begin(const std::string& clipName, const std::string& extens
         return false;
     }
 
+    // Make sure the "/.year" file exists (created with the default year on a
+    // fresh card). The year in that file is what we stamp onto each clip's file
+    // date, since the camera slate name only carries MMDDHHMM (no year).
+    ensureYearFile();
+
     // Sanitise the clip name (drops placeholder slate names like "Next Clip" and
     // replaces any file-name-unsafe characters). The caller falls back to a
     // generated "clip_NNNN" name when this comes back empty.
@@ -712,6 +717,20 @@ bool GyroLogWriter::end()
         closeFile(); // flush() + close() -- updates the in-RAM directory entry
         syncVolume(); // unmount/remount -- commits the directory entry to the card
         _finalFileSizeBytes = fileSize(_gcsvPath); // re-open + read the committed size
+
+        // Stamp the file's mtime with a real date (not the 1970 epoch the ESP32's
+        // unset clock would otherwise give). At this point the file still has its
+        // generic name (the real slate name arrives later via playback, in
+        // applySlateName()). If the current name has no parseable date, fall back
+        // to the most recent real clip's month/day (the ESP32 has no real clock,
+        // so "today" isn't available) in the year from the "/.year" file. If a
+        // real slate name arrives later, applySlateName() re-stamps with the exact
+        // date, overwriting this fallback.
+        int fm = 0, fd = 0, fh = 0, fmin = 0;
+        if(!parseSlateDate(_startedName, fm, fd, fh, fmin) && _lastSlateMonth > 0 && _lastSlateDay > 0)
+        {
+            setFileMtime(_gcsvPath, readYearFile(), _lastSlateMonth, _lastSlateDay, 0, 0);
+        }
     }
 
     // Capture the summary. The clip duration is the number of samples captured
@@ -784,6 +803,20 @@ void GyroLogWriter::applySlateName(const std::string& slateName, const std::stri
         {
             DEBUG_INFO("[GYRO] applySlateName: rename FAILED (src exists=%d)", (int)_sd.exists(oldPath));
         }
+    }
+
+    // Stamp the file's mtime with the clip's real date. The slate name carries
+    // MMDDHHMM but no year; the year comes from the "/.year" file on the card.
+    // If the slate name has no parseable date we leave the file as-is (the
+    // fallback date is applied in end() for clips that never get a slate name).
+    int sm = 0, sd = 0, sh = 0, smin = 0;
+    if(parseSlateDate(slateName, sm, sd, sh, smin))
+    {
+        // Remember this date as the most recent real clip date (used as the
+        // fallback for clips that have no slate date of their own).
+        _lastSlateMonth = sm;
+        _lastSlateDay = sd;
+        setFileMtime(_gcsvPath, readYearFile(), sm, sd, sh, smin);
     }
 
     // Reflect the new name in the summary shown on the Gyro Log screen.
@@ -947,4 +980,196 @@ void GyroLogWriter::analyzeTIndex(const std::string& path)
         path.c_str(), (unsigned long)rows, (unsigned long)firstT, (unsigned long)lastT,
         (unsigned long)maxGap, (int)backwards,
         (rows > 0 && firstT == 0 && lastT == rows - 1 && maxGap <= 1 && !backwards) ? "CLEAN" : "DEGRADED");
+}
+
+// ---- Clip date (file mtime) ----
+
+// Read the year from "/.year". The file holds a plain 4-digit year (e.g. "2026").
+// Returns the stored year, or kDefaultYear if the file is missing or unparseable.
+int GyroLogWriter::readYearFile() const
+{
+    if(!_sdReady)
+        return kDefaultYear;
+
+    File f = SD_MMC.open("/.year", "r");
+    if(!f)
+        return kDefaultYear;
+
+    uint8_t buf[16] = {0};
+    size_t n = (size_t)f.read(buf, sizeof(buf) - 1);
+    f.close();
+
+    // Trim trailing whitespace/newline.
+    while(n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' '))
+        buf[--n] = 0;
+
+    // Must be exactly 4 digits to be a valid year.
+    if(n != 4)
+        return kDefaultYear;
+    for(size_t i = 0; i < 4; i++)
+        if(buf[i] < '0' || buf[i] > '9')
+            return kDefaultYear;
+
+    int year = (buf[0] - '0') * 1000 + (buf[1] - '0') * 100 + (buf[2] - '0') * 10 + (buf[3] - '0');
+    if(year < 1970 || year > 2100)
+        return kDefaultYear;
+    return year;
+}
+
+// Write the year to "/.year" and commit it to the card.
+bool GyroLogWriter::writeYearFile(int year)
+{
+    if(!_sdReady)
+        return false;
+
+    File f = SD_MMC.open("/.year", "w");
+    if(!f)
+        return false;
+
+    char buf[8];
+    int n = snprintf(buf, sizeof(buf), "%d\n", year);
+    f.write((const uint8_t*)buf, (size_t)n);
+    f.flush();
+    f.close();
+    syncVolume(); // commit the directory entry to the card
+    return true;
+}
+
+// If "/.year" does not exist, create it with the default year so a fresh card
+// gets a working year without any manual step.
+void GyroLogWriter::ensureYearFile()
+{
+    if(!_sdReady)
+        return;
+
+    if(_sd.exists("/.year"))
+        return; // already present; leave the user's value alone
+
+    writeYearFile(kDefaultYear);
+    DEBUG_INFO("[GYRO] ensureYearFile: created /.year with default year %d", kDefaultYear);
+}
+
+// Set the file at `path`'s mtime to the given date.
+//
+// The ESP32-S3's system clock is never set (no RTC), so it sits at epoch
+// (1970-01-01). The SD card's FatFs layer stamps a file's mtime from that clock at
+// close time, which is why every .gcsv file came out dated 1970. To correct a
+// file's date we (1) set the system clock to the target date, (2) re-touch the file
+// (open + close) so FatFs re-stamps its mtime from the now-correct clock, and
+// (3) restore the clock. The re-touch is what matters: FatFs writes the mtime
+// from the *current* system clock on close, so a freshly-closed file picks up the
+// date we just set.
+void GyroLogWriter::setFileMtime(const std::string& path, int year, int month, int day, int hour, int minute)
+{
+    if(!_sdReady)
+        return;
+
+    // Clamp the fields into a valid range so mktime doesn't roll them into a
+    // neighbouring month/year in a surprising way.
+    if(month < 1) month = 1;
+    if(month > 12) month = 12;
+    if(day < 1) day = 1;
+    if(day > 31) day = 28; // safe for every month
+    if(hour < 0) hour = 0;
+    if(hour > 23) hour = 23;
+    if(minute < 0) minute = 0;
+    if(minute > 59) minute = 59;
+
+    // Save the current (epoch) clock so we can restore it.
+    struct timeval saved;
+    gettimeofday(&saved, nullptr);
+
+    // Set the system clock to the target date in UTC. We force TZ=UTC so mktime
+    // interprets the struct tm as UTC (the FAT mtime is stored in local time, but
+    // we want the wall-clock date the user sees, and the device has no real
+    // timezone, so UTC is the sensible choice). This mirrors the pattern used in
+    // M5CoreS3/utility/RTC8563_Class.cpp (setenv TZ + mktime + settimeofday).
+    char oldTz[16] = {0};
+    const char* tz = getenv("TZ");
+    if(tz)
+        snprintf(oldTz, sizeof(oldTz), "%s", tz);
+    setenv("TZ", "UTC0", 1);
+    tzset();
+
+    struct tm t = {0};
+    t.tm_year = year - 1900;
+    t.tm_mon = month - 1;
+    t.tm_mday = day;
+    t.tm_hour = hour;
+    t.tm_min = minute;
+    t.tm_sec = 0;
+    t.tm_isdst = -1;
+
+    time_t tt = mktime(&t);
+    struct timeval now;
+    now.tv_sec = tt;
+    now.tv_usec = 0;
+    settimeofday(&now, nullptr);
+
+    // Re-touch the file: opening and closing it makes FatFs rewrite the
+    // directory entry's mtime from the (now-correct) system clock. We open in
+    // "r" mode (read) so we don't alter the file's contents at all.
+    File f = SD_MMC.open(path.c_str(), "r");
+    if(f)
+    {
+        f.close();
+    }
+    syncVolume(); // commit the updated directory entry to the card
+
+    // Restore the previous clock (epoch) so we don't leave the device clock
+    // permanently shifted. The device has no other clock consumers, but
+    // restoring keeps the behaviour predictable.
+    setenv("TZ", oldTz[0] ? oldTz : "UTC0", 1);
+    tzset();
+    settimeofday(&saved, nullptr);
+
+    DEBUG_INFO("[GYRO] setFileMtime('%s') -> %04d-%02d-%02d %02d:%02d",
+        path.c_str(), year, month, day, hour, minute);
+}
+
+// Extract the MMDDHHMM block from a Blackmagic slate name. The slate name has
+// the form "<project>_<MMDDHHMM>_<clip>" (e.g. "A002_09100833_C013"), where the
+// 8-digit block is month(2) day(2) hour(2) minute(2). We scan for the first run
+// of exactly 8 digits that parses to a valid date/time. Returns false if none is
+// found (so the caller can fall back to a default date).
+bool GyroLogWriter::parseSlateDate(const std::string& slateName, int& month, int& day, int& hour, int& minute)
+{
+    month = day = hour = minute = 0;
+
+    // Find the first run of 8 consecutive digits.
+    size_t i = 0;
+    while(i < slateName.size())
+    {
+        if(slateName[i] >= '0' && slateName[i] <= '9')
+        {
+            size_t start = i;
+            while(i < slateName.size() && slateName[i] >= '0' && slateName[i] <= '9')
+                i++;
+            size_t len = i - start;
+            if(len >= 8)
+            {
+                // Take the first 8 digits of this run.
+                char d[8];
+                for(int k = 0; k < 8; k++)
+                    d[k] = slateName[start + k];
+                int mm = (d[0] - '0') * 10 + (d[1] - '0');
+                int dd = (d[2] - '0') * 10 + (d[3] - '0');
+                int hh = (d[4] - '0') * 10 + (d[5] - '0');
+                int mi = (d[6] - '0') * 10 + (d[7] - '0');
+                if(mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31 && hh <= 23 && mi <= 59)
+                {
+                    month = mm;
+                    day = dd;
+                    hour = hh;
+                    minute = mi;
+                    return true;
+                }
+            }
+        }
+        else
+        {
+            i++;
+        }
+    }
+    return false;
 }

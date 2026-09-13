@@ -287,7 +287,8 @@ enum class Screens : byte
   Lens = 109,
   Slate = 110,
   Project = 111,
-  GyroLog = 112
+  GyroLog = 112,
+  Year = 113
 };
 
 Screens connectedScreenIndex = Screens::NoConnection; // The index of the screen we're on:
@@ -505,6 +506,14 @@ void Screen_Common(int sideBarColour)
 
             sprite->fillSmoothRoundRect(120, 210, 80, 40, 3, TFT_DARKCYAN);
             sprite->drawCenterString("ORIENT >", 160, 217, &AgencyFB_Bold9pt7b);
+            break;
+          case Screens::Year:
+            // A = year -1, B = year +1 (both saved to /.year), C = next screen.
+            sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
+            sprite->drawCenterString("< YEAR", 70, 217, &AgencyFB_Bold9pt7b);
+
+            sprite->fillSmoothRoundRect(120, 210, 80, 40, 3, TFT_DARKCYAN);
+            sprite->drawCenterString("YEAR >", 160, 217, &AgencyFB_Bold9pt7b);
             break;
         }
       }
@@ -1093,6 +1102,78 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->setTextColor(gyroLog.sdReady() ? TFT_GREEN : TFT_RED);
     sprite->drawString(gyroLog.sdStatusMessage().c_str(), 230, 53, &Lato_Regular6pt7b);
   }
+
+  sprite->pushSprite(0, 0);
+}
+
+// Year editor: sets the year stored in the "/.year" file on the SD card. The
+// camera's slate name only carries MMDDHHMM (no year), so this is where the user
+// supplies the year that gets stamped onto each clip's file date. A = year -1,
+// B = year +1 (both saved immediately), C = next screen.
+void Screen_Year(bool forceRefresh = false)
+{
+  if(!BMDControlSystem::getInstance()->hasCamera())
+    return;
+
+  connectedScreenIndex = Screens::Year;
+
+  // Handle the A/B buttons: step the year and save it to /.year.
+  bool tappedAction = false;
+  if(btnAPressed || btnBPressed)
+  {
+    DEBUG_DEBUG("Year: Btn A/B pressed (year)");
+
+    int year = gyroLog.readYearFile();
+    if(btnAPressed)
+      year--;
+    else
+      year++;
+
+    // Keep the year in a sane range.
+    if(year < 1970) year = 1970;
+    if(year > 2100) year = 2100;
+
+    if(gyroLog.writeYearFile(year))
+      tappedAction = true;
+  }
+
+  // Only redraw when something changed (a button press) or forced. The year
+  // value is static otherwise, so we can skip the refresh like the GyroLog
+  // summary does.
+  if(!forceRefresh && !tappedAction && lastRefreshedScreen == BMDControlSystem::getInstance()->getCamera()->getLastModified())
+  {
+    return;
+  }
+  lastRefreshedScreen = BMDControlSystem::getInstance()->getCamera()->getLastModified();
+
+  sprite->fillSprite(TFT_BLACK);
+
+  Screen_Common_Connected(); // Common elements
+
+  // Title
+  sprite->setTextColor(TFT_WHITE);
+  sprite->drawString("CLIP YEAR", 30, 9, &AgencyFB_Bold9pt7b);
+
+  sprite->setFont(&Lato_Regular11pt7b);
+
+  // The current year (large, centred).
+  sprite->setTextColor(TFT_LIGHTGREY);
+  sprite->drawString("YEAR (saved to /.year)", 30, 45, &Lato_Regular5pt7b);
+
+  char yearBuf[16];
+  snprintf(yearBuf, sizeof(yearBuf), "%d", gyroLog.readYearFile());
+  sprite->setTextColor(TFT_CYAN);
+  sprite->drawCenterString(yearBuf, IWIDTH / 2, 90, &Lato_Regular11pt7b);
+
+  // Explanation
+  sprite->setTextColor(TFT_LIGHTGREY);
+  sprite->drawString("The camera's clip name has no year,", 30, 150, &Lato_Regular5pt7b);
+  sprite->drawString("so the year for each clip's file date", 30, 163, &Lato_Regular5pt7b);
+  sprite->drawString("comes from this value.", 30, 176, &Lato_Regular5pt7b);
+
+  // Hint
+  sprite->setTextColor(TFT_LIGHTGREY);
+  sprite->drawString("A = year -1, B = year +1", 30, 205, &Lato_Regular5pt7b);
 
   sprite->pushSprite(0, 0);
 }
@@ -4741,6 +4822,9 @@ void loop() {
         case Screens::GyroLog:
           Screen_GyroLog();
           break;
+        case Screens::Year:
+          Screen_Year();
+          break;
       }
     }
     else
@@ -4886,11 +4970,12 @@ void loop() {
     keyCPressed = false;
     DEBUG_DEBUG("Button C (GPIO18) > NEXT SCREEN");
     // Screen order, with Gyro Log first so the list loops back to it:
-    //   GyroLog -> Dashboard -> Recording -> ISO -> Shutter -> WB -> Tint ->
+    //   GyroLog -> Year -> Dashboard -> Recording -> ISO -> Shutter -> WB -> Tint ->
     //   Codec -> Resolution -> Framerate -> Media -> Lens -> (back to) GyroLog
     switch(connectedScreenIndex)
     {
-      case Screens::GyroLog:    connectedScreenIndex = Screens::Dashboard; break;
+      case Screens::GyroLog:    connectedScreenIndex = Screens::Year; break;
+      case Screens::Year:       connectedScreenIndex = Screens::Dashboard; break;
       case Screens::Dashboard: connectedScreenIndex = Screens::Recording; break;
       case Screens::Recording: connectedScreenIndex = Screens::ISO; break;
       case Screens::ISO:       connectedScreenIndex = Screens::ShutterAngleSpeed; break;

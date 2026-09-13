@@ -220,10 +220,37 @@ public:
     // GCSV file at `path`. Returns the row count, or -1 if it can't be opened.
     long countSamplesInFile(const std::string& path);
     // Scan a closed GCSV file's "t" index and report its health: first/last t,
-    // row count, largest gap between consecutive t (a gap = dropped samples), and
-    // whether t ever goes backwards (a reset). A clean file has first=0,
-    // last=N-1, maxGap=1, no backwards steps.
+    // row count, largest gap between consecutive t values (a gap = dropped samples),
+    // and whether t ever goes backwards (a reset). A clean file has first=0,
+    // last=N-1, maxGap=1, and no backwards steps.
     void analyzeTIndex(const std::string& path);
+
+    // ---- Clip date (file mtime) ----
+    // The ESP32-S3 has no battery-backed RTC and the firmware never sets the
+    // system clock, so it is always at epoch (1970-01-01) at boot. The SD card's
+    // FatFs layer stamps a file's mtime from that clock, so every .gcsv file came
+    // out dated 1970. To fix this without an RTC/NTP we:
+    //   * keep the clip's YEAR in a small "/.year" file on the SD card (the camera
+    //     slate name only carries MMDDHHMM, never a year), and
+    //   * before a file is closed, set the system clock to the target date and
+    //     re-touch the file so FatFs re-stamps its mtime from the corrected clock.
+    //
+    // Read the year from "/.year". Returns the stored year, or the built-in default
+    // (2026) if the file is missing or unparseable.
+    int readYearFile() const;
+    // Write the year to "/.year" and commit it to the card.
+    bool writeYearFile(int year);
+    // If "/.year" does not exist, create it with the default year. Called once
+    // after the SD card is mounted so a fresh card gets a working year.
+    void ensureYearFile();
+    // Set the file at `path`'s mtime to the given date. Sets the system clock to
+    // that date (GMT), re-touches the file so FatFs re-stamps its mtime, then
+    // restores the clock. No-op if the card is not mounted.
+    void setFileMtime(const std::string& path, int year, int month, int day, int hour, int minute);
+    // Extract the MMDDHHMM block from a Blackmagic slate name (e.g.
+    // "A002_09100833_C013" -> month=09 day=10 hour=08 minute=33). Returns false if
+    // no valid 8-digit MMDDHHMM block is present.
+    static bool parseSlateDate(const std::string& slateName, int& month, int& day, int& hour, int& minute);
 
     // The measured sample rate in Hz (1/_tscale). The E2E test uses this to
     // compute the expected sample count for a given clip duration.
@@ -343,6 +370,15 @@ private:
 
     // The GCSV orientation token index (0..23), persisted in NVS.
     int _orientationIndex = 0;
+
+    // The month/day of the most recent clip whose slate name carried a real
+    // MMDDHHMM date. Used as the fallback date for clips that have no parseable
+    // slate date (generic "clip_NNNN" names or "Next Clip" placeholders): the
+    // ESP32 has no real clock, so we can't use "today", but reusing the last real
+    // clip's month/day gives a plausible recent date in the correct year.
+    // 0 means "no slate date seen yet".
+    int _lastSlateMonth = 0;
+    int _lastSlateDay = 0;
 
     // NVS keys for persisting the orientation.
     static const char* kNvsNamespace;
