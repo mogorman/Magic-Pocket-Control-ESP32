@@ -704,9 +704,14 @@ bool GyroLogWriter::end()
 
     if(_file)
     {
-        _finalFileSizeBytes = _file.size();
-        closeFile(); // flush() + close()
-        syncVolume();
+        // Close the file and commit the directory entry to the card FIRST, then
+        // re-open it to read the committed size. Reading _file.size() before
+        // closeFile() returns the stale in-RAM FAT directory-entry size (0 for a
+        // freshly-truncated file), which is why the GUI showed 0 MB even though the
+        // on-disk file was the correct size.
+        closeFile(); // flush() + close() -- updates the in-RAM directory entry
+        syncVolume(); // unmount/remount -- commits the directory entry to the card
+        _finalFileSizeBytes = fileSize(_gcsvPath); // re-open + read the committed size
     }
 
     // Capture the summary. The clip duration is the number of samples captured
