@@ -4297,9 +4297,39 @@ static void assertPowerHold()
 
 // Drop the power-hold and enter deep sleep. SYS_EN is held low through the sleep
 // so the board actually powers off (on battery) rather than waking again.
+//
+// This board has no PMU: the display, touch, and IMU sit on an always-on rail
+// that survives the ESP32 losing power. If left in their active modes they
+// drain the battery in ~2 days (ST7789 ~5-10mA, CST816T ~1-2mA, QMI8658 ~1.3mA).
+// We put each into its lowest-power state before dropping SYS_EN so standby
+// draw drops to ~20uA (weeks of battery life).
 static void powerOff()
 {
   display.setBacklight(false);
+
+  // ST7789: SLPIN (0x10) puts the display controller into sleep (~1uA vs ~5-10mA).
+  display.sleep();
+  delay(10);
+
+  // CST816T touch: write 0x03 to control register 0xA5 -> standby (<1uA).
+  Wire.beginTransmission(0x15);
+  Wire.write(0xA5);
+  Wire.write(0x03);
+  Wire.endTransmission();
+
+  // QMI8658 IMU: CTRL1 (0x02) bits[1:0]=10 -> sleep mode (~20uA vs ~1.3mA).
+  Wire.beginTransmission(0x6B);
+  Wire.write(0x02);
+  Wire.write(0x02);
+  Wire.endTransmission();
+
+  // Drive SPI pins to safe low-leakage states before the ESP32 releases them.
+  digitalWrite(LCD_CS, HIGH);
+  digitalWrite(LCD_SCLK, LOW);
+  digitalWrite(LCD_MOSI, LOW);
+  digitalWrite(LCD_DC, LOW);
+  digitalWrite(LCD_RESET, HIGH);
+
   delay(50);
   digitalWrite(BAT_EN, LOW);
   gpio_hold_en((gpio_num_t)BAT_EN);
