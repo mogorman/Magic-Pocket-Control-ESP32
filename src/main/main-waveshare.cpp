@@ -417,6 +417,9 @@ static std::string gyroVideoExtension(BMDCamera* cam)
   return "braw";
 }
 
+// Forward declaration (defined further down near the power-management code).
+static int batteryPercent();
+
 // Display elements on the screen common to all pages
 void Screen_Common(int sideBarColour)
 {
@@ -425,6 +428,17 @@ void Screen_Common(int sideBarColour)
     // Sidebar colour
     sprite->fillRect(0, 0, 13, IHEIGHT, sideBarColour);
     sprite->fillRect(13, 0, 2, IHEIGHT, TFT_DARKGREY);
+
+    // Battery level indicator, top-right corner. Drawn on every screen that uses
+    // this chrome; hidden when no battery is fitted (batteryPercent() == -1).
+    {
+      int pct = batteryPercent();
+      if(pct >= 0)
+      {
+        sprite->setTextColor(pct <= 20 ? TFT_RED : TFT_GREEN);
+        sprite->drawRightString(String(pct) + "%", IWIDTH_SPRITE - 4, 6, &AgencyFB_Regular9pt7b);
+      }
+    }
 
     if(BMDControlSystem::getInstance()->hasCamera())
     {
@@ -4273,6 +4287,52 @@ void Screen_Lens(bool forceRefresh = false)
   }
 
   sprite->pushSprite(0, 0);
+}
+
+// ---- Battery level (Waveshare ESP32-S3-Touch-LCD-1.54) ----
+//
+// The LiPo voltage is sensed on GPIO1 (BAT_ADC) through a 200K (upper) / 100K
+// (lower) resistor divider, so V_bat = 3 x V_adc (see the board schematic,
+// resistors R27/R32). A full cell reads ~4.20V, an empty one ~3.00V.
+//
+// The ADC is read through analogReadMilliVolts() at the full 0-3.2V range
+// (ADC_11db on the ESP32-S3); the framework applies the eFuse VREF calibration
+// so the mV figure is as accurate as the S3's ADC allows. The result is cached
+// and refreshed at most once per second, so the per-frame cost is negligible.
+#define BAT_ADC_PIN 1
+static int           s_batPct = -1;  // -1 = no battery fitted / not yet measured
+static unsigned long s_batMs  = 0;
+
+// Returns a 0-100 % charge estimate for the onboard single-cell LiPo, or -1 if
+// no battery is connected (divider output implausibly low).
+static int batteryPercent()
+{
+  const unsigned long now = millis();
+  if(s_batPct >= 0 && (now - s_batMs) < 1000UL)
+    return s_batPct;
+  s_batMs = now;
+
+  analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);  // S3: full 0-3.2V range
+  long mvSum = 0;
+  const int N = 8;
+  for(int i = 0; i < N; i++)
+  {
+    mvSum += analogReadMilliVolts(BAT_ADC_PIN);
+    delayMicroseconds(30);
+  }
+  const float v_bat = (mvSum / (float)N) * 3.0f;  // (200K + 100K) / 100K
+
+  if(v_bat < 2.8f)  // divider output far below a live cell -> no battery fitted
+  {
+    s_batPct = -1;
+    return -1;
+  }
+
+  int pct = (int)((v_bat - 3.0f) / (4.2f - 3.0f) * 100.0f + 0.5f);
+  if(pct < 0) pct = 0;
+  if(pct > 100) pct = 100;
+  s_batPct = pct;
+  return pct;
 }
 
 // ---- Power management (Waveshare ESP32-S3-Touch-LCD-1.54) ----
