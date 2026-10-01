@@ -203,6 +203,15 @@ public:
     {
         drawRightString(s.c_str(), rightX, y, f);
     }
+    int textWidth(const char* s, const lgfx::IFont* f = nullptr)
+    {
+        if(_gfx) return _gfx->textWidth(s, f ? f : _font);
+        return 0;
+    }
+    int textWidth(const String& s, const lgfx::IFont* f = nullptr)
+    {
+        return textWidth(s.c_str(), f);
+    }
 
     // Blit the off-screen sprite to the panel. The sprite is 320x240 (the native
     // layout); the panel is 240x240, so we downscale horizontally by 0.75 (nearest
@@ -436,7 +445,7 @@ void Screen_Common(int sideBarColour)
       if(pct >= 0)
       {
         sprite->setTextColor(pct <= 20 ? TFT_RED : TFT_GREEN);
-        sprite->drawRightString(String(pct) + "%", IWIDTH_SPRITE - 4, 6, &AgencyFB_Bold9pt7b);
+        sprite->drawRightString(String(pct) + "%", IWIDTH_SPRITE - 4, 6, &Lato_Regular12pt7b);
       }
     }
 
@@ -576,47 +585,59 @@ void Screen_NoConnection()
   // Bluetooth Image
   sprite->pushImage(26, 6, 30, 46, Wikipedia_Bluetooth_30x46);
 
+  // Connection state is drawn up top, right next to the battery indicator.
+  // Right-align it just left of the battery (when present), otherwise flush
+  // right, so it always sits beside the battery in the top bar.
+  int connRightX = IWIDTH_SPRITE - 4;
+  int battPct = batteryPercent();
+  if(battPct >= 0)
+  {
+    String battStr = String(battPct) + "%";
+    int battW = sprite->textWidth(battStr.c_str(), &Lato_Regular12pt7b);
+    connRightX = (IWIDTH_SPRITE - 4) - battW - 6;
+  }
+
   switch(cameraConnection.status)
   {
     case BMDCameraConnection::Scanning:
       Screen_Common(TFT_BLUE); // Common elements
-      sprite->drawString("Scanning...", 70, 20);
+      sprite->drawRightString("Scanning...", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::ScanningFound:
       Screen_Common(TFT_BLUE); // Common elements
       if(cameraConnection.cameraAddresses.size() == 1)
       {
-        sprite->drawString("Found, connecting...", 70, 20);
+        sprite->drawRightString("Found, connecting...", connRightX, 6, &Lato_Regular12pt7b);
         connectToCameraIndex = 0;
       }
       else
-        sprite->drawString("Found cameras", 70, 20); // Multiple camera selection is below
+        sprite->drawRightString("Found cameras", connRightX, 6, &Lato_Regular12pt7b); // Multiple camera selection is below
       break;
     case BMDCameraConnection::ScanningNoneFound:
       Screen_Common(TFT_RED); // Common elements
-      sprite->drawString("No camera found", 70, 20);
+      sprite->drawRightString("No camera found", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::Connecting:
       Screen_Common(TFT_YELLOW); // Common elements
-      sprite->drawString("Connecting...", 70, 20);
+      sprite->drawRightString("Connecting...", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::NeedPassKey:
       Screen_Common(TFT_PURPLE); // Common elements
-      sprite->drawString("Need Pass Key", 70, 20);
+      sprite->drawRightString("Need Pass Key", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::FailedPassKey:
       Screen_Common(TFT_ORANGE); // Common elements
-      sprite->drawString("Wrong Pass Key", 70, 20);
+      sprite->drawRightString("Wrong Pass Key", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::Disconnected:
       DEBUG_DEBUG("NoConnection - Disconnected");
       Screen_Common(TFT_RED); // Common elements
-      sprite->drawString("Disconnected (wait)", 70, 20);
+      sprite->drawRightString("Disconnected (wait)", connRightX, 6, &Lato_Regular12pt7b);
       break;
     case BMDCameraConnection::IncompatibleProtocol:
       // Note: This needs to be worked on as there's no incompatible protocol connections yet.
       Screen_Common(TFT_RED); // Common elements
-      sprite->drawString("Incompatible Protocol", 70, 20);
+      sprite->drawRightString("Incompatible Protocol", connRightX, 6, &Lato_Regular12pt7b);
       break;
     default:
       break;
