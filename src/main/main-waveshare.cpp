@@ -1043,13 +1043,13 @@ void Screen_GyroLog(bool forceRefresh = false)
     uint64_t sdTotal = 0, sdFree = 0;
     if(gyroLog.sdReady() && gyroLog.sdCapacity(sdTotal, sdFree))
     {
-      char sdBuf[48];
+      char sdBuf[32];
       if(sdFree < 1024ULL * 1024 * 1024)
-        snprintf(sdBuf, sizeof(sdBuf), "%llu MB / %.1f GB",
-          (unsigned long long)(sdFree / (1024ULL * 1024)),
+        snprintf(sdBuf, sizeof(sdBuf), "%.2f / %.0f",
+          (double)sdFree / (1024.0 * 1024.0 * 1024.0),
           (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
       else
-        snprintf(sdBuf, sizeof(sdBuf), "%.1f GB / %.1f GB",
+        snprintf(sdBuf, sizeof(sdBuf), "%.0f / %.0f",
           (double)sdFree / (1024.0 * 1024.0 * 1024.0),
           (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
       sprite->setTextColor(TFT_GREEN);
