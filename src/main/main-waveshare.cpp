@@ -1054,6 +1054,9 @@ void Screen_GyroLog(bool forceRefresh = false)
           (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
       sprite->setTextColor(TFT_GREEN);
       sprite->drawString(sdBuf, 30, 6, &Lato_Regular12pt7b);
+      // "GB" appended to the total, in a smaller font.
+      int numW = sprite->textWidth(sdBuf, &Lato_Regular12pt7b);
+      sprite->drawString("GB", 30 + numW + 2, 11, &Lato_Regular6pt7b);
     }
     else
     {
