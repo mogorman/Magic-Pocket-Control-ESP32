@@ -1122,12 +1122,12 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->drawString("Z", cZ, 30, &Lato_Regular6pt7b);
 
     char gBuf[3][12], aBuf[3][12];
-    snprintf(gBuf[0], sizeof(gBuf[0]), "%.2f", gx);
-    snprintf(gBuf[1], sizeof(gBuf[1]), "%.2f", gy);
-    snprintf(gBuf[2], sizeof(gBuf[2]), "%.2f", gz);
-    snprintf(aBuf[0], sizeof(aBuf[0]), "%.2f", ax);
-    snprintf(aBuf[1], sizeof(aBuf[1]), "%.2f", ay);
-    snprintf(aBuf[2], sizeof(aBuf[2]), "%.2f", az);
+    snprintf(gBuf[0], sizeof(gBuf[0]), "%.3f", gx);
+    snprintf(gBuf[1], sizeof(gBuf[1]), "%.3f", gy);
+    snprintf(gBuf[2], sizeof(gBuf[2]), "%.3f", gz);
+    snprintf(aBuf[0], sizeof(aBuf[0]), "%.3f", ax);
+    snprintf(aBuf[1], sizeof(aBuf[1]), "%.3f", ay);
+    snprintf(aBuf[2], sizeof(aBuf[2]), "%.3f", az);
     sprite->setTextColor(TFT_WHITE);
     sprite->drawString("G", cType, 44, &Lato_Regular11pt7b);
     sprite->drawString(gBuf[0], cX, 44, &Lato_Regular11pt7b);
@@ -1138,7 +1138,7 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->drawString(aBuf[1], cY, 64, &Lato_Regular11pt7b);
     sprite->drawString(aBuf[2], cZ, 64, &Lato_Regular11pt7b);
     // Capture metadata row: Year / ISO / Speed / WB.
-    const int mYear = 30, mISO = 95, mSpeed = 155, mWB = 215;
+    const int mYear = 30, mISO = 90, mSpeed = 150, mWB = 230;
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("Year", mYear, 95, &Lato_Regular6pt7b);
     sprite->drawString("ISO", mISO, 95, &Lato_Regular6pt7b);
@@ -1183,7 +1183,7 @@ void Screen_GyroLog(bool forceRefresh = false)
 
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Lay flat for calibration", 30, 195, &Lato_Regular6pt7b);
+    sprite->drawString("Lay flat for calibration", 30, 195, &Lato_Regular11pt7b);
   }
 
   sprite->pushSprite(0, 0);
