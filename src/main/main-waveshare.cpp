@@ -1030,9 +1030,37 @@ void Screen_GyroLog(bool forceRefresh = false)
 
   Screen_Common_Connected(); // Common elements
 
-  // Title
-  sprite->setTextColor(TFT_WHITE);
-  sprite->drawString("GYRO LOG", 30, 9, &AgencyFB_Bold9pt7b);
+  // SD card info up top where the title used to be. No heading, same size as the
+  // battery. Free / Total, dropping to MB under 1 GB. Probe the card at most
+  // every few seconds (a missing card makes begin() slow).
+  {
+    static uint32_t lastSdProbeMs = 0;
+    if(millis() - lastSdProbeMs >= 3000)
+    {
+      lastSdProbeMs = millis();
+      gyroLog.probeSd();
+    }
+    uint64_t sdTotal = 0, sdFree = 0;
+    if(gyroLog.sdReady() && gyroLog.sdCapacity(sdTotal, sdFree))
+    {
+      char sdBuf[48];
+      if(sdFree < 1024ULL * 1024 * 1024)
+        snprintf(sdBuf, sizeof(sdBuf), "%llu MB / %.1f GB",
+          (unsigned long long)(sdFree / (1024ULL * 1024)),
+          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
+      else
+        snprintf(sdBuf, sizeof(sdBuf), "%.1f GB / %.1f GB",
+          (double)sdFree / (1024.0 * 1024.0 * 1024.0),
+          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
+      sprite->setTextColor(TFT_GREEN);
+      sprite->drawString(sdBuf, 30, 6, &Lato_Regular12pt7b);
+    }
+    else
+    {
+      sprite->setTextColor(TFT_RED);
+      sprite->drawString(gyroLog.sdStatusMessage().c_str(), 30, 6, &Lato_Regular12pt7b);
+    }
+  }
 
   // M5GFX, set font here rather than on each drawString line
   sprite->setFont(&Lato_Regular11pt7b);
@@ -1130,40 +1158,6 @@ void Screen_GyroLog(bool forceRefresh = false)
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
-
-    // SD card status diagnostic (bottom-right, clear of the gyro readout). The
-    // card isn't mounted until the first probe (begin() only mounts when a
-    // recording actually starts), so probe it here -- at most every few seconds,
-    // so a missing card can't stall the live readout. Green when ready.
-    static uint32_t lastSdProbeMs = 0;
-    if(millis() - lastSdProbeMs >= 3000)
-    {
-      lastSdProbeMs = millis();
-      gyroLog.probeSd();
-    }
-    sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("SD CARD", 180, 185, &Lato_Regular5pt7b);
-    uint64_t sdTotal = 0, sdFree = 0;
-    if(gyroLog.sdReady() && gyroLog.sdCapacity(sdTotal, sdFree))
-    {
-      // Free / Total. Free shows in GB, dropping to MB under 1 GB.
-      char sdBuf[48];
-      if(sdFree < 1024ULL * 1024 * 1024)
-        snprintf(sdBuf, sizeof(sdBuf), "%llu MB / %.1f GB",
-          (unsigned long long)(sdFree / (1024ULL * 1024)),
-          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
-      else
-        snprintf(sdBuf, sizeof(sdBuf), "%.1f GB / %.1f GB",
-          (double)sdFree / (1024.0 * 1024.0 * 1024.0),
-          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
-      sprite->setTextColor(TFT_GREEN);
-      sprite->drawString(sdBuf, 180, 198, &Lato_Regular6pt7b);
-    }
-    else
-    {
-      sprite->setTextColor(TFT_RED);
-      sprite->drawString(gyroLog.sdStatusMessage().c_str(), 180, 198, &Lato_Regular6pt7b);
-    }
   }
 
   sprite->pushSprite(0, 0);
