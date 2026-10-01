@@ -111,6 +111,9 @@ It would be great if you could let the community know what ESP32 device you have
 # Can't I use a mobile/tablet app?
 Yes, indeed you can! Alternatively, this is designed as a lightweight small device that allows you to see and control basic functions of your camera. It can act as a dedicated device for each camera you have, or simply to avoid touching the camera to control it (when it's on a gimbal, mounted somewhere, or in a moving car :) ).
 
+# 3D-printed case
+There's a 3D-printed cold-shoe case that lets you drop the device onto a camera cold shoe. The OpenSCAD model and build/assembly instructions live in the [case folder](case/).
+
 # How do I run this?
 You will need the following:
 - An ESP32 device
