@@ -521,15 +521,6 @@ void Screen_Common(int sideBarColour)
             sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
             sprite->drawCenterString("FOCUS", 70, 217, &AgencyFB_Bold9pt7b);
             break;
-          case Screens::GyroLog:
-            // A = previous orientation, B = next orientation (calibration),
-            // C = next screen.
-            sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
-            sprite->drawCenterString("< ORIENT", 70, 217, &AgencyFB_Bold9pt7b);
-
-            sprite->fillSmoothRoundRect(120, 210, 80, 40, 3, TFT_DARKCYAN);
-            sprite->drawCenterString("ORIENT >", 160, 217, &AgencyFB_Bold9pt7b);
-            break;
           case Screens::Year:
             // A = year -1, B = year +1 (both saved to /.year), C = next screen.
             sprite->fillSmoothRoundRect(30, 210, 80, 40, 3, TFT_DARKCYAN);
@@ -992,22 +983,6 @@ void Screen_GyroLog(bool forceRefresh = false)
 
   auto camera = BMDControlSystem::getInstance()->getCamera();
 
-  // Handle the A/B buttons: step the GCSV orientation (calibration).
-  bool tappedAction = false;
-  if(btnAPressed || btnBPressed)
-  {
-    DEBUG_DEBUG("GyroLog: Btn A/B pressed (orientation)");
-
-    int idx = gyroLog.getOrientationIndex();
-    if(btnAPressed)
-      idx = (idx - 1 + GyroLogWriter::kOrientationCount) % GyroLogWriter::kOrientationCount;
-    else
-      idx = (idx + 1) % GyroLogWriter::kOrientationCount;
-
-    gyroLog.setOrientationIndex(idx);
-    tappedAction = true;
-  }
-
   // While actively recording the screen is turned off (the IMU is being
   // sampled and written to the SD card). Don't draw anything and don't touch
   // the display while in this state.
@@ -1020,7 +995,7 @@ void Screen_GyroLog(bool forceRefresh = false)
   // redraw every loop tick or the numbers appear frozen. (The IMU is always
   // powered up, so the live readout always has current values.)
   const bool showSummary = gyroLog.getSummary().valid;
-  if(showSummary && !forceRefresh && !tappedAction && lastRefreshedScreen == camera->getLastModified())
+  if(showSummary && !forceRefresh && lastRefreshedScreen == camera->getLastModified())
   {
     return; // summary is unchanged and nothing was pressed
   }
@@ -1134,33 +1109,77 @@ void Screen_GyroLog(bool forceRefresh = false)
       ax = rax; ay = ray; az = raz;
     }
 
+    // Dense IMU table: rows G (gyro rad/s), A (accel g), O (orientation).
+    const int cType = 30, cX = 70, cY = 135, cZ = 200;
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("GYRO (rad/s)", 30, 40, &Lato_Regular5pt7b);
-    char gBuf[64];
-    snprintf(gBuf, sizeof(gBuf), "x %7.3f  y %7.3f  z %7.3f", gx, gy, gz);
-    sprite->setTextColor(TFT_WHITE);
-    sprite->drawString(gBuf, 30, 53, &Lato_Regular11pt7b);
+    sprite->drawString("Type", cType, 32, &Lato_Regular5pt7b);
+    sprite->drawString("X", cX, 32, &Lato_Regular5pt7b);
+    sprite->drawString("Y", cY, 32, &Lato_Regular5pt7b);
+    sprite->drawString("Z", cZ, 32, &Lato_Regular5pt7b);
 
-    sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("ACCEL (g)", 30, 95, &Lato_Regular5pt7b);
-    char aBuf[64];
-    snprintf(aBuf, sizeof(aBuf), "x %7.3f  y %7.3f  z %7.3f", ax, ay, az);
+    char gBuf[3][12], aBuf[3][12];
+    snprintf(gBuf[0], sizeof(gBuf[0]), "%.2f", gx);
+    snprintf(gBuf[1], sizeof(gBuf[1]), "%.2f", gy);
+    snprintf(gBuf[2], sizeof(gBuf[2]), "%.2f", gz);
+    snprintf(aBuf[0], sizeof(aBuf[0]), "%.2f", ax);
+    snprintf(aBuf[1], sizeof(aBuf[1]), "%.2f", ay);
+    snprintf(aBuf[2], sizeof(aBuf[2]), "%.2f", az);
     sprite->setTextColor(TFT_WHITE);
-    sprite->drawString(aBuf, 30, 108, &Lato_Regular11pt7b);
-
-    // Current orientation token (with its index, so it can be reported back)
+    sprite->drawString("G", cType, 45, &Lato_Regular6pt7b);
+    sprite->drawString(gBuf[0], cX, 45, &Lato_Regular6pt7b);
+    sprite->drawString(gBuf[1], cY, 45, &Lato_Regular6pt7b);
+    sprite->drawString(gBuf[2], cZ, 45, &Lato_Regular6pt7b);
+    sprite->drawString("A", cType, 58, &Lato_Regular6pt7b);
+    sprite->drawString(aBuf[0], cX, 58, &Lato_Regular6pt7b);
+    sprite->drawString(aBuf[1], cY, 58, &Lato_Regular6pt7b);
+    sprite->drawString(aBuf[2], cZ, 58, &Lato_Regular6pt7b);
+    // Capture metadata row: Year / ISO / Speed / WB.
+    const int mYear = 30, mISO = 95, mSpeed = 155, mWB = 215;
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("ORIENTATION", 30, 150, &Lato_Regular5pt7b);
-    sprite->setTextColor(TFT_CYAN);
-    char orientBuf[24];
-    snprintf(orientBuf, sizeof(orientBuf), "%s  (#%d)",
-      GyroLogWriter::orientationToken(gyroLog.getOrientationIndex()),
-      gyroLog.getOrientationIndex());
-    sprite->drawString(orientBuf, 30, 163, &Lato_Regular11pt7b);
+    sprite->drawString("Year", mYear, 98, &Lato_Regular5pt7b);
+    sprite->drawString("ISO", mISO, 98, &Lato_Regular5pt7b);
+    sprite->drawString("Speed", mSpeed, 98, &Lato_Regular5pt7b);
+    sprite->drawString("WB", mWB, 98, &Lato_Regular5pt7b);
+
+    // Year changes only via the Year editor; cache the SD read so the live
+    // readout doesn't hit the card every tick.
+    static int cachedYear = -1;
+    static uint32_t lastYearReadMs = 0;
+    if(cachedYear < 0 || millis() - lastYearReadMs >= 5000)
+    {
+      cachedYear = gyroLog.readYearFile();
+      lastYearReadMs = millis();
+    }
+    char yBuf[8];
+    snprintf(yBuf, sizeof(yBuf), "%d", cachedYear);
+
+    char isoBuf[12];
+    if(camera->hasSensorGainISOValue())
+      snprintf(isoBuf, sizeof(isoBuf), "%d", (int)camera->getSensorGainISOValue());
+    else
+      snprintf(isoBuf, sizeof(isoBuf), "-");
+    char speedBuf[16];
+    if(camera->shutterValueIsAngle && camera->hasShutterAngle())
+      snprintf(speedBuf, sizeof(speedBuf), "%d", (int)(camera->getShutterAngle() / 100.0f));
+    else if(camera->hasShutterSpeed())
+      snprintf(speedBuf, sizeof(speedBuf), "1/%d", (int)camera->getShutterSpeed());
+    else
+      snprintf(speedBuf, sizeof(speedBuf), "-");
+    char wbBuf[12];
+    if(camera->hasWhiteBalance())
+      snprintf(wbBuf, sizeof(wbBuf), "%d", (int)camera->getWhiteBalance());
+    else
+      snprintf(wbBuf, sizeof(wbBuf), "-");
+
+    sprite->setTextColor(TFT_WHITE);
+    sprite->drawString(yBuf, mYear, 111, &Lato_Regular6pt7b);
+    sprite->drawString(isoBuf, mISO, 111, &Lato_Regular6pt7b);
+    sprite->drawString(speedBuf, mSpeed, 111, &Lato_Regular6pt7b);
+    sprite->drawString(wbBuf, mWB, 111, &Lato_Regular6pt7b);
 
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
+    sprite->drawString("Lay flat for calibration", 30, 195, &Lato_Regular5pt7b);
   }
 
   sprite->pushSprite(0, 0);
