@@ -205,6 +205,10 @@ public:
     // SD card status, for the on-screen diagnostic.
     bool sdReady() const { return _sdReady; }
     const std::string& sdStatusMessage() const { return _sdStatusMessage; }
+    // Probe/mount the SD card so the diagnostic reflects reality. Cheap no-op once
+    // mounted. With no card present begin() is slow, so the caller should throttle
+    // (don't call it every frame).
+    bool probeSd();
 
     // Compute the free-space figure for the summary. This calls
     // freeClusterCount(), which on a large card walks the whole FAT (tens of

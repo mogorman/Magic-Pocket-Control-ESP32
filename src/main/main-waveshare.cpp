@@ -1131,11 +1131,20 @@ void Screen_GyroLog(bool forceRefresh = false)
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("Lay flat, A/B to set orientation", 30, 195, &Lato_Regular5pt7b);
 
-    // SD card status diagnostic (top-right). Green when ready, red otherwise.
+    // SD card status diagnostic (bottom-right, clear of the gyro readout). The
+    // card isn't mounted until the first probe (begin() only mounts when a
+    // recording actually starts), so probe it here -- at most every few seconds,
+    // so a missing card can't stall the live readout. Green when ready.
+    static uint32_t lastSdProbeMs = 0;
+    if(millis() - lastSdProbeMs >= 3000)
+    {
+      lastSdProbeMs = millis();
+      gyroLog.probeSd();
+    }
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("SD CARD", 230, 40, &Lato_Regular5pt7b);
+    sprite->drawString("SD CARD", 180, 185, &Lato_Regular5pt7b);
     sprite->setTextColor(gyroLog.sdReady() ? TFT_GREEN : TFT_RED);
-    sprite->drawString(gyroLog.sdStatusMessage().c_str(), 230, 53, &Lato_Regular6pt7b);
+    sprite->drawString(gyroLog.sdStatusMessage().c_str(), 180, 198, &Lato_Regular6pt7b);
   }
 
   sprite->pushSprite(0, 0);
