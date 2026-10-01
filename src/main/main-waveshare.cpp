@@ -436,7 +436,7 @@ void Screen_Common(int sideBarColour)
       if(pct >= 0)
       {
         sprite->setTextColor(pct <= 20 ? TFT_RED : TFT_GREEN);
-        sprite->drawRightString(String(pct) + "%", IWIDTH_SPRITE - 4, 6, &AgencyFB_Regular9pt7b);
+        sprite->drawRightString(String(pct) + "%", IWIDTH_SPRITE - 4, 6, &AgencyFB_Bold9pt7b);
       }
     }
 
