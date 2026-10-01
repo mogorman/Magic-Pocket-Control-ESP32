@@ -112,6 +112,16 @@ bool GyroLogWriter::probeSd()
     return ensureSd();
 }
 
+bool GyroLogWriter::sdCapacity(uint64_t& totalBytes, uint64_t& freeBytes)
+{
+    if(!_sdReady)
+        return false;
+    totalBytes = _sd.totalBytes();
+    uint64_t used = _sd.usedBytes();
+    freeBytes = (totalBytes >= used) ? (totalBytes - used) : 0;
+    return true;
+}
+
 // Force the FAT volume's cached directory entries (file sizes + cluster
 // pointers) to be written to the card. FatFile::close() flushes the file's own
 // data, but the directory entry that records a file's size lives in a separate

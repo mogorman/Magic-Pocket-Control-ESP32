@@ -1143,8 +1143,27 @@ void Screen_GyroLog(bool forceRefresh = false)
     }
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("SD CARD", 180, 185, &Lato_Regular5pt7b);
-    sprite->setTextColor(gyroLog.sdReady() ? TFT_GREEN : TFT_RED);
-    sprite->drawString(gyroLog.sdStatusMessage().c_str(), 180, 198, &Lato_Regular6pt7b);
+    uint64_t sdTotal = 0, sdFree = 0;
+    if(gyroLog.sdReady() && gyroLog.sdCapacity(sdTotal, sdFree))
+    {
+      // Free / Total. Free shows in GB, dropping to MB under 1 GB.
+      char sdBuf[48];
+      if(sdFree < 1024ULL * 1024 * 1024)
+        snprintf(sdBuf, sizeof(sdBuf), "%llu MB / %.1f GB",
+          (unsigned long long)(sdFree / (1024ULL * 1024)),
+          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
+      else
+        snprintf(sdBuf, sizeof(sdBuf), "%.1f GB / %.1f GB",
+          (double)sdFree / (1024.0 * 1024.0 * 1024.0),
+          (double)sdTotal / (1024.0 * 1024.0 * 1024.0));
+      sprite->setTextColor(TFT_GREEN);
+      sprite->drawString(sdBuf, 180, 198, &Lato_Regular6pt7b);
+    }
+    else
+    {
+      sprite->setTextColor(TFT_RED);
+      sprite->drawString(gyroLog.sdStatusMessage().c_str(), 180, 198, &Lato_Regular6pt7b);
+    }
   }
 
   sprite->pushSprite(0, 0);
