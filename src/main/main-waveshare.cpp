@@ -532,9 +532,13 @@ void Screen_Common(int sideBarColour)
         }
       }
 
-      // Common Next Button
-      sprite->fillSmoothRoundRect(215, 210, 80, 40, 3, TFT_DARKCYAN);
-      sprite->drawCenterString("NEXT", 255, 217, &AgencyFB_Bold9pt7b);
+      // Common Next Button (hidden on the GyroLog screen; the C button still
+      // advances).
+      if(connectedScreenIndex != Screens::GyroLog)
+      {
+        sprite->fillSmoothRoundRect(215, 210, 80, 40, 3, TFT_DARKCYAN);
+        sprite->drawCenterString("NEXT", 255, 217, &AgencyFB_Bold9pt7b);
+      }
     }
 }
 
@@ -1112,10 +1116,10 @@ void Screen_GyroLog(bool forceRefresh = false)
     // Dense IMU table: rows G (gyro rad/s), A (accel g), O (orientation).
     const int cType = 30, cX = 70, cY = 135, cZ = 200;
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Type", cType, 32, &Lato_Regular5pt7b);
-    sprite->drawString("X", cX, 32, &Lato_Regular5pt7b);
-    sprite->drawString("Y", cY, 32, &Lato_Regular5pt7b);
-    sprite->drawString("Z", cZ, 32, &Lato_Regular5pt7b);
+    sprite->drawString("Type", cType, 30, &Lato_Regular6pt7b);
+    sprite->drawString("X", cX, 30, &Lato_Regular6pt7b);
+    sprite->drawString("Y", cY, 30, &Lato_Regular6pt7b);
+    sprite->drawString("Z", cZ, 30, &Lato_Regular6pt7b);
 
     char gBuf[3][12], aBuf[3][12];
     snprintf(gBuf[0], sizeof(gBuf[0]), "%.2f", gx);
@@ -1125,21 +1129,21 @@ void Screen_GyroLog(bool forceRefresh = false)
     snprintf(aBuf[1], sizeof(aBuf[1]), "%.2f", ay);
     snprintf(aBuf[2], sizeof(aBuf[2]), "%.2f", az);
     sprite->setTextColor(TFT_WHITE);
-    sprite->drawString("G", cType, 45, &Lato_Regular6pt7b);
-    sprite->drawString(gBuf[0], cX, 45, &Lato_Regular6pt7b);
-    sprite->drawString(gBuf[1], cY, 45, &Lato_Regular6pt7b);
-    sprite->drawString(gBuf[2], cZ, 45, &Lato_Regular6pt7b);
-    sprite->drawString("A", cType, 58, &Lato_Regular6pt7b);
-    sprite->drawString(aBuf[0], cX, 58, &Lato_Regular6pt7b);
-    sprite->drawString(aBuf[1], cY, 58, &Lato_Regular6pt7b);
-    sprite->drawString(aBuf[2], cZ, 58, &Lato_Regular6pt7b);
+    sprite->drawString("G", cType, 44, &Lato_Regular11pt7b);
+    sprite->drawString(gBuf[0], cX, 44, &Lato_Regular11pt7b);
+    sprite->drawString(gBuf[1], cY, 44, &Lato_Regular11pt7b);
+    sprite->drawString(gBuf[2], cZ, 44, &Lato_Regular11pt7b);
+    sprite->drawString("A", cType, 64, &Lato_Regular11pt7b);
+    sprite->drawString(aBuf[0], cX, 64, &Lato_Regular11pt7b);
+    sprite->drawString(aBuf[1], cY, 64, &Lato_Regular11pt7b);
+    sprite->drawString(aBuf[2], cZ, 64, &Lato_Regular11pt7b);
     // Capture metadata row: Year / ISO / Speed / WB.
     const int mYear = 30, mISO = 95, mSpeed = 155, mWB = 215;
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Year", mYear, 98, &Lato_Regular5pt7b);
-    sprite->drawString("ISO", mISO, 98, &Lato_Regular5pt7b);
-    sprite->drawString("Speed", mSpeed, 98, &Lato_Regular5pt7b);
-    sprite->drawString("WB", mWB, 98, &Lato_Regular5pt7b);
+    sprite->drawString("Year", mYear, 95, &Lato_Regular6pt7b);
+    sprite->drawString("ISO", mISO, 95, &Lato_Regular6pt7b);
+    sprite->drawString("Speed", mSpeed, 95, &Lato_Regular6pt7b);
+    sprite->drawString("WB", mWB, 95, &Lato_Regular6pt7b);
 
     // Year changes only via the Year editor; cache the SD read so the live
     // readout doesn't hit the card every tick.
@@ -1172,14 +1176,14 @@ void Screen_GyroLog(bool forceRefresh = false)
       snprintf(wbBuf, sizeof(wbBuf), "-");
 
     sprite->setTextColor(TFT_WHITE);
-    sprite->drawString(yBuf, mYear, 111, &Lato_Regular6pt7b);
-    sprite->drawString(isoBuf, mISO, 111, &Lato_Regular6pt7b);
-    sprite->drawString(speedBuf, mSpeed, 111, &Lato_Regular6pt7b);
-    sprite->drawString(wbBuf, mWB, 111, &Lato_Regular6pt7b);
+    sprite->drawString(yBuf, mYear, 109, &Lato_Regular11pt7b);
+    sprite->drawString(isoBuf, mISO, 109, &Lato_Regular11pt7b);
+    sprite->drawString(speedBuf, mSpeed, 109, &Lato_Regular11pt7b);
+    sprite->drawString(wbBuf, mWB, 109, &Lato_Regular11pt7b);
 
     // Hint
     sprite->setTextColor(TFT_LIGHTGREY);
-    sprite->drawString("Lay flat for calibration", 30, 195, &Lato_Regular5pt7b);
+    sprite->drawString("Lay flat for calibration", 30, 195, &Lato_Regular6pt7b);
   }
 
   sprite->pushSprite(0, 0);
