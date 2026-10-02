@@ -70,13 +70,13 @@ wall_h  = obj_h + wall_lip;   // wall height above the floor's top face
 //               offset of its centre along the wall from the wall's centre]
 usb_cut = [16, 10, 8.6, 0];    // USB-C, right wall (+x)
 usb_r   = 2;                   // USB-C window corner radius (rounded rectangle)
-sd_cut  = [17, 6, 8.3, 0];     // microSD slot, back wall (+y) - widened for easy removal
+sd_cut  = [19, 6, 8.3, 0];     // microSD slot, back wall (+y) - widened for easy removal
 sd_r    = 2.5;                 // microSD window corner radius (rounded rectangle)
 
 // microSD window is open at the top: it covers the slot and runs up past the
 // wall's top edge so the card can be pushed in from above.
 sd_win_top = floor_t + wall_h + 1;                              // 1 mm above the wall top
-sd_win_bot = floor_t + (obj_h - sd_cut[2]) - sd_cut[1] / 2 - 2; // slot bottom, minus 2 mm
+sd_win_bot = floor_t + (obj_h - sd_cut[2]) - sd_cut[1] / 2 - 4; // slot bottom, minus 4 mm
 sd_win_h   = sd_win_top - sd_win_bot;
 sd_win_c   = (sd_win_top + sd_win_bot) / 2;
 
