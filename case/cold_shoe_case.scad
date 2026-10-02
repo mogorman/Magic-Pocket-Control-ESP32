@@ -77,7 +77,7 @@ sd_r    = 2.5;                 // microSD window corner radius (rounded rectangl
 // wall's top edge so the card can be pushed in from above.
 sd_win_top = floor_t + wall_h + 1;                              // 1 mm above the wall top
 sd_win_bot = floor_t + (obj_h - sd_cut[2]) - sd_cut[1] / 2 - 4; // slot bottom, minus 4 mm
-sd_win_h   = sd_win_top - sd_win_bot;
+sd_win_h   = sd_win_top - sd_win_bot +3;
 sd_win_c   = (sd_win_top + sd_win_bot) / 2;
 
 // one large rounded-rect window covering the whole button row, front wall (-y):
@@ -174,7 +174,7 @@ module pocket() {
       cylinder(h = csbore_t, d = csbore_d);
 
     // microSD slot cutout, back wall (+y): rounded rectangle, open at the top
-    translate([sd_cut[3], inner_d / 2 - 1, sd_win_c])
+    #translate([sd_cut[3], inner_d / 2 - 1, sd_win_c])
       rotate([-90, 0, 0])
         linear_extrude(wall_t + 2)
           rounded_rect(sd_cut[0], sd_win_h, sd_r);
