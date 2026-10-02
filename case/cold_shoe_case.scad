@@ -68,10 +68,17 @@ wall_h  = obj_h + wall_lip;   // wall height above the floor's top face
 // --- access cutouts -----------------------------------------------------
 // each cutout: [width, height, height of its centre from the device top,
 //               offset of its centre along the wall from the wall's centre]
-usb_cut = [14, 8, 8.6, 0];    // USB-C, right wall (+x)
-usb_r   = 2;                  // USB-C window corner radius (rounded rectangle)
-sd_cut  = [15, 6, 8.3, 0];    // microSD slot, back wall (+y) - widened for easy removal
-sd_r    = 2.5;                // microSD window corner radius (rounded rectangle)
+usb_cut = [16, 10, 8.6, 0];    // USB-C, right wall (+x)
+usb_r   = 2;                   // USB-C window corner radius (rounded rectangle)
+sd_cut  = [17, 6, 8.3, 0];     // microSD slot, back wall (+y) - widened for easy removal
+sd_r    = 2.5;                 // microSD window corner radius (rounded rectangle)
+
+// microSD window is open at the top: it covers the slot and runs up past the
+// wall's top edge so the card can be pushed in from above.
+sd_win_top = floor_t + wall_h + 1;                              // 1 mm above the wall top
+sd_win_bot = floor_t + (obj_h - sd_cut[2]) - sd_cut[1] / 2 - 2; // slot bottom, minus 2 mm
+sd_win_h   = sd_win_top - sd_win_bot;
+sd_win_c   = (sd_win_top + sd_win_bot) / 2;
 
 // one large rounded-rect window covering the whole button row, front wall (-y):
 //   width  = 2 pitches (10 mm) + 6 mm = 26 mm
@@ -166,11 +173,11 @@ module pocket() {
     translate([5.91+0.125+0.05, 0, floor_t - csbore_t])
       cylinder(h = csbore_t, d = csbore_d);
 
-    // microSD slot cutout, back wall (+y): rounded rectangle
-    translate([sd_cut[3], inner_d / 2 - 1, floor_t + (obj_h - sd_cut[2])])
+    // microSD slot cutout, back wall (+y): rounded rectangle, open at the top
+    translate([sd_cut[3], inner_d / 2 - 1, sd_win_c])
       rotate([-90, 0, 0])
         linear_extrude(wall_t + 2)
-          rounded_rect(sd_cut[0], sd_cut[1], sd_r);
+          rounded_rect(sd_cut[0], sd_win_h, sd_r);
 
     // USB-C cutout, right wall (+x): rounded rectangle
     translate([4+ inner_d / 2, usb_cut[3], floor_t + (obj_h - usb_cut[2])])
