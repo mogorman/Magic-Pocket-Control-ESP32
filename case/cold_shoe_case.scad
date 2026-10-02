@@ -32,8 +32,8 @@
   Printing: each part prints with its flat face down, no supports needed.
 
   Wall layout (top view, screen facing up):
-    front (-y) : 3 buttons      back (+y) : microSD slot
-    left  (-x) : plain          right (+x): USB-C
+    front (-y) : 3 buttons      back (+y) : USB-C
+    left  (-x) : plain          right (+x): microSD slot
   The shoe lip is on the USB side by default; flip it with lip_side.
 */
 
@@ -68,9 +68,9 @@ wall_h  = obj_h + wall_lip;   // wall height above the floor's top face
 // --- access cutouts -----------------------------------------------------
 // each cutout: [width, height, height of its centre from the device top,
 //               offset of its centre along the wall from the wall's centre]
-usb_cut = [16, 10, 8.6, 0];    // USB-C, right wall (+x)
+usb_cut = [16, 10, 8.6, 0];    // USB-C, back wall (+y)
 usb_r   = 2;                   // USB-C window corner radius (rounded rectangle)
-sd_cut  = [19, 6, 8.3, 0];     // microSD slot, back wall (+y) - widened for easy removal
+sd_cut  = [19, 6, 8.3, 0];     // microSD slot, right wall (+x) - widened for easy removal
 sd_r    = 2.5;                 // microSD window corner radius (rounded rectangle)
 
 // microSD window is open at the top: it covers the slot and runs up past the
@@ -160,31 +160,31 @@ module pocket() {
 
     // shank clearance hole through the floor, plus a blind head recess at the
     // top face (the screw head sits recessed in it, below the device)
-    translate([-5.91-0.125, 0, 0])
+    translate([-5.91-0.125-1, 0, 0])
     cylinder(h = floor_t, d = screw_hole_d);
-    translate([-5.91-0.125, 0, floor_t - csbore_t])
+    translate([-5.91-0.125-1, 0, floor_t - csbore_t])
       cylinder(h = csbore_t, d = csbore_d);
 
 
    // shank clearance hole through the floor, plus a blind head recess at the
     // top face (the screw head sits recessed in it, below the device)
-    translate([5.91+0.125+0.05, 0, 0])
+    translate([5.91+0.125+0.05-1, 0, 0])
     cylinder(h = floor_t, d = screw_hole_d);
-    translate([5.91+0.125+0.05, 0, floor_t - csbore_t])
+    translate([5.91+0.125+0.05-1, 0, floor_t - csbore_t])
       cylinder(h = csbore_t, d = csbore_d);
 
-    // microSD slot cutout, back wall (+y): rounded rectangle, open at the top
-    #translate([sd_cut[3], inner_d / 2 - 1, sd_win_c])
+    // USB-C cutout, back wall (+y): rounded rectangle
+    translate([usb_cut[3], inner_d / 2 - 1, floor_t + (obj_h - usb_cut[2])])
       rotate([-90, 0, 0])
         linear_extrude(wall_t + 2)
-          rounded_rect(sd_cut[0], sd_win_h, sd_r);
+          rounded_rect(usb_cut[0], usb_cut[1], usb_r);
 
-    // USB-C cutout, right wall (+x): rounded rectangle
-    translate([4+ inner_d / 2, usb_cut[3], floor_t + (obj_h - usb_cut[2])])
+    // microSD slot cutout, right wall (+x): rounded rectangle, open at the top
+    translate([4+ inner_d / 2, sd_cut[3], sd_win_c])
       rotate([90, 0, 0])
         rotate([0, -90, 0])
           linear_extrude(wall_t + 2)
-            rounded_rect(usb_cut[0], usb_cut[1], usb_r);
+            rounded_rect(sd_cut[0], sd_win_h, sd_r);
 
     // button window, front wall (-y): one large rounded rectangle
     translate([0, 1 - inner_d / 2, floor_t + (obj_h - btn_z)])
