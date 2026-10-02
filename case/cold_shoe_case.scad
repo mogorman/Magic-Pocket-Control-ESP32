@@ -160,17 +160,17 @@ module pocket() {
 
     // shank clearance hole through the floor, plus a blind head recess at the
     // top face (the screw head sits recessed in it, below the device)
-    translate([-5.91-0.125-4, 0, 0])
+    translate([-5.91-0.125-8, 0, 0])
     cylinder(h = floor_t, d = screw_hole_d);
-    translate([-5.91-0.125-4, 0, floor_t - csbore_t])
+    translate([-5.91-0.125-8, 0, floor_t - csbore_t])
       cylinder(h = csbore_t, d = csbore_d);
 
 
    // shank clearance hole through the floor, plus a blind head recess at the
     // top face (the screw head sits recessed in it, below the device)
-    translate([5.91+0.125+0.05-4, 0, 0])
+    translate([5.91+0.125+0.05-8, 0, 0])
     cylinder(h = floor_t, d = screw_hole_d);
-    translate([5.91+0.125+0.05-4, 0, floor_t - csbore_t])
+    translate([5.91+0.125+0.05-8, 0, floor_t - csbore_t])
       cylinder(h = csbore_t, d = csbore_d);
 
     // USB-C cutout, back wall (+y): rounded rectangle
