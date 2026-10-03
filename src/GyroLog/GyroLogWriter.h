@@ -376,7 +376,7 @@ private:
     volatile uint32_t _i2cFailures = 0;
 
     // The GCSV orientation token index (0..23), persisted in NVS.
-    int _orientationIndex = 0;
+    int _orientationIndex = 23; // "zyx"
 
     // The month/day of the most recent clip whose slate name carried a real
     // MMDDHHMM date. Used as the fallback date for clips that have no parseable

@@ -14,20 +14,21 @@
 #endif
 
 // The 24 GCSV orientation tokens, indexed by orientation index (0..23).
+// Must match the set accepted by Gyroflow.
 const char* const GYROLOG_ORIENTATION_TOKENS[GyroLogWriter::kOrientationCount] =
 {
     // Permutation X Y Z
-    "XYZ", "XyZ", "XYz", "xYz",
+    "XYZ", "Xyz", "xYz", "xyZ",
     // Permutation X Z Y
-    "XZY", "XzY", "XZy", "xZy",
+    "XzY", "xZY", "XZy", "xzy",
     // Permutation Y X Z
-    "YXZ", "YxZ", "YXz", "yXz",
+    "yXZ", "YxZ", "YXz", "yxz",
     // Permutation Y Z X
-    "YZX", "YzX", "YZx", "yZx",
+    "YZX", "Yzx", "yZx", "yzX",
     // Permutation Z X Y
-    "ZXY", "ZxY", "ZXy", "zXy",
+    "ZXY", "Zxy", "zXy", "zxY",
     // Permutation Z Y X
-    "ZYX", "ZyX", "ZYx", "zYx"
+    "ZYx", "ZyX", "zYX", "zyx"
 };
 
 // gscale: raw gyro (deg/s) -> rad/s. The QMI8658 gyro is configured +/-1024 deg/s
@@ -875,7 +876,7 @@ void GyroLogWriter::loadOrientation()
             _orientationIndex = (val >= kOrientationCount) ? 0 : (int)val;
         nvs_close(handle);
     }
-    // Default stays 0 if nothing stored.
+    // Default stays 23 ("zyx") if nothing stored.
 }
 
 // ---- Filesystem helpers (used by the E2E test) ----
