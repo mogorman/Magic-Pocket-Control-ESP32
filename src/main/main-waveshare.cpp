@@ -1114,7 +1114,7 @@ void Screen_GyroLog(bool forceRefresh = false)
     }
 
     // Dense IMU table: rows G (gyro rad/s), A (accel g), O (orientation).
-    const int cType = 30, cX = 70, cY = 135, cZ = 200;
+    const int cType = 30, cX = 80, cY = 155, cZ = 230;
     sprite->setTextColor(TFT_LIGHTGREY);
     sprite->drawString("Type", cType, 30, &Lato_Regular6pt7b);
     sprite->drawString("X", cX, 30, &Lato_Regular6pt7b);
