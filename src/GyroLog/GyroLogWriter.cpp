@@ -876,7 +876,7 @@ void GyroLogWriter::loadOrientation()
             _orientationIndex = (val >= kOrientationCount) ? 0 : (int)val;
         nvs_close(handle);
     }
-    // Default stays 23 ("zyx") if nothing stored.
+    // Default stays 13 ("Yzx") if nothing stored.
 }
 
 // ---- Filesystem helpers (used by the E2E test) ----
